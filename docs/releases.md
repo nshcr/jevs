@@ -27,7 +27,7 @@ marketplace 包含 `.agents/plugins/marketplace.json`、根 README、`docs/provi
 
 工作流先对触发时的 SHA 执行 Linux/macOS 验证，再检出同一 SHA 重建发布目录。发布 job 使用 `contents: write` 将目录提交到 release 分支：首次创建独立根提交，后续保留历史，通过普通 push 更新。
 
-Action 不需要 PAT 或模型密钥，使用仓库 `GITHUB_TOKEN`；仓库规则需允许该 token 更新 release 分支。Actions 固定提交，发布并发串行且不取消正在执行的发布。保护规则拒绝写入时任务失败，不绕过规则。
+Action 不需要 PAT 或模型密钥，使用仓库 `GITHUB_TOKEN`；仓库规则需允许该 token 更新 release 分支。外部 Actions 固定完整版本标签，发布并发串行且不取消正在执行的发布。保护规则拒绝写入时任务失败，不绕过规则。
 
 发布脚本要求工作区干净、构建来源等于 HEAD。再次发布同一源码及相同清单为 no-op；不同源码必须是已发布源码的后继，且版本必须递增。同版本不同内容和过期源码都被拒绝。
 
