@@ -1,0 +1,161 @@
+[
+  {
+    "arguments": {
+      "content": {
+        "message": "Please refund the duplicate charge; also I cannot log in."
+      },
+      "items": [
+        {
+          "id": "billing",
+          "question": "Does `message` mention a billing issue?"
+        },
+        {
+          "id": "access",
+          "question": "Does `message` mention an account access issue?"
+        }
+      ]
+    },
+    "name": "multi-label",
+    "tool": "check"
+  },
+  {
+    "arguments": {
+      "content": {
+        "source": "Contact old@example.test for support. Send my receipt to new@example.test."
+      },
+      "items": [
+        {
+          "id": "receipt_email",
+          "options": {
+            "new": {
+              "value": "new@example.test"
+            },
+            "none": "No candidate matches",
+            "old": {
+              "value": "old@example.test"
+            }
+          },
+          "question": {
+            "field": "email",
+            "question": "Which candidate is the requested receipt destination in `source`?"
+          }
+        }
+      ]
+    },
+    "name": "candidate-extraction",
+    "tool": "classify"
+  },
+  {
+    "arguments": {
+      "content": {
+        "candidates": {
+          "a": "Use the reset link on the login page.",
+          "b": "Change billing information in settings."
+        },
+        "query": "Reset a forgotten password"
+      },
+      "items": [
+        {
+          "id": "a",
+          "levels": [
+            "Unrelated",
+            "Related but insufficient",
+            "Directly answers"
+          ],
+          "question": "How well does `candidates.a` answer `query`?"
+        },
+        {
+          "id": "b",
+          "levels": [
+            "Unrelated",
+            "Related but insufficient",
+            "Directly answers"
+          ],
+          "question": "How well does `candidates.b` answer `query`?"
+        }
+      ]
+    },
+    "name": "rank-candidates",
+    "tool": "score"
+  },
+  {
+    "arguments": {
+      "checks": [
+        {
+          "id": "urgent",
+          "no": {
+            "description": "No deadline stated"
+          },
+          "question": [
+            "Does `ticket` request action within a specific short deadline?"
+          ],
+          "yes": {
+            "examples": ["today", "within an hour"]
+          }
+        }
+      ],
+      "classifications": [
+        {
+          "id": "team",
+          "options": {
+            "billing": {
+              "includes": ["charges", "refunds"]
+            },
+            "other": null
+          },
+          "question": "Which team should handle `ticket`?"
+        }
+      ],
+      "content": {
+        "ticket": "The second charge caused an overdraft. Please refund it today."
+      },
+      "scores": [
+        {
+          "id": "impact",
+          "levels": [
+            {
+              "description": "No stated impact"
+            },
+            {
+              "description": "Inconvenience"
+            },
+            {
+              "description": "Financial loss"
+            }
+          ],
+          "question": {
+            "question": "How serious is the stated impact in `ticket`?"
+          }
+        }
+      ]
+    },
+    "name": "mixed-structured",
+    "tool": "assess_structure"
+  },
+  {
+    "arguments": {
+      "checks": [
+        {
+          "id": "refund",
+          "question": "Does message request a refund?"
+        }
+      ],
+      "records": [
+        {
+          "content": {
+            "message": "Please refund the duplicate charge."
+          },
+          "id": "ticket_a"
+        },
+        {
+          "content": {
+            "message": "How do I update my address?"
+          },
+          "id": "ticket_b"
+        }
+      ]
+    },
+    "name": "Independent records with shared rubric",
+    "tool": "assess_batch"
+  }
+]

@@ -1,0 +1,36 @@
+{
+  "name": "jevs",
+  "version": "0.1.0",
+  "description": "Jev structured judgments through MCP tools and a Codex plugin, using the official TypeSafe SDK and Bun",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "format": "prettier --write .",
+    "check": "bun scripts/governance.ts && bun scripts/audit.ts && prettier --check . && tsc --noEmit",
+    "test": "bun test ./tests",
+    "build": "bun scripts/build.ts",
+    "verify": "bun run check && bun run test && bun run build && bun scripts/smoke.ts && bun scripts/plugin-build.ts && bun scripts/audit.ts --assets",
+    "version:set": "bun scripts/version.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@typesafe-ai/sdk": "0.6.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "prettier": "3.6.2",
+    "typescript": "7.0.2"
+  },
+  "license": "MIT",
+  "packageManager": "bun@1.4.2",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nshcr/jevs.git"
+  },
+  "author": "nshcr"
+}
