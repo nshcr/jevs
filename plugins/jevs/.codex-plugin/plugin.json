@@ -1,0 +1,22 @@
+{
+  "name": "jevs",
+  "description": "Jev structured judgments through simple MCP tools, with caller guidance.",
+  "author": {
+    "name": "nshcr"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Jevs",
+    "shortDescription": "Classify, score and verify with Jev.",
+    "longDescription": "Classify, score and check evidence with Jev, including structured judgments, independent record batches and bundled caller guidance. Requires Bun and server-side credentials for TypeSafe or a compatible provider.",
+    "developerName": "nshcr",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Use Jev to classify and verify this content."
+    ]
+  },
+  "version": "0.1.0"
+}
