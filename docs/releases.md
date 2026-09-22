@@ -23,7 +23,7 @@ marketplace 包含 `.agents/plugins/marketplace.json`、根 README、`docs/provi
 1. 修改源码；已发布版本有变化时，运行 `bun run version:set -- <version>` 提升版本。
 2. 运行 `bun run verify`，提交改动并推送 main。
 3. 在 GitHub Actions 中从 **main** 手动运行 **Publish Codex marketplace**。
-4. 确认工作流成功，并核对 release 分支 `build-info.json` 中的版本和来源 SHA。
+4. 确认工作流成功，在 job summary 查看版本、来源 SHA 和 release 提交；脚本会回读远端 release 引用核验。也可核对 release 分支 `build-info.json`。
 
 工作流先对触发时的 SHA 执行 Linux/macOS 验证，再检出同一 SHA 重建发布目录。发布 job 使用 `contents: write` 将目录提交到 release 分支：首次创建独立根提交，后续保留历史，通过普通 push 更新。
 

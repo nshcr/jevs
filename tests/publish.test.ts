@@ -59,12 +59,18 @@ test("release branch publishes locally, updates safely and rejects stale or reus
     await Bun.write(join(root, "uncommitted.txt"), "dirty");
     await expect(publish(root)).rejects.toThrow("clean source checkout");
     await rm(join(root, "uncommitted.txt"));
-    await publish(root);
+    const firstResult = await publish(root);
     const initial = await git(["rev-parse", "refs/heads/release"], remote);
+    expect(firstResult).toEqual({
+      version: "0.1.0",
+      source: first,
+      release: initial,
+      changed: true,
+    });
     const files = await git(["ls-tree", "-r", "--name-only", initial], remote);
     expect(files).toContain(".agents/plugins/marketplace.json");
     expect(files).not.toContain(".gitignore");
-    await publish(root);
+    expect(await publish(root)).toEqual({ ...firstResult, changed: false });
     expect(await git(["rev-parse", "refs/heads/release"], remote)).toBe(
       initial,
     );

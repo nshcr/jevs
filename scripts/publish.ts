@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -60,8 +60,12 @@ export async function publish(root: string, remote = "origin") {
         (await Bun.file(join(market, "CHECKSUMS.sha256")).text()).trim(),
         "Same source produced different assets",
       );
-      console.log("Release already matches source; no push needed.");
-      return;
+      return {
+        version: info.version as string,
+        source: head,
+        release: parent,
+        changed: false,
+      };
     }
     await run(["merge-base", "--is-ancestor", previous.git.head, head]);
     assert(
@@ -87,7 +91,18 @@ export async function publish(root: string, remote = "origin") {
     ]);
     // No force: concurrent writers or branch protection fail without overwriting.
     await run(["push", remote, `${commit}:refs/heads/release`]);
-    console.log(`Published ${info.version} from ${head} to release`);
+    const published = await run(["ls-remote", remote, "refs/heads/release"]);
+    assert.equal(
+      published.split(/\s+/)[0],
+      commit,
+      "Remote release does not match published commit",
+    );
+    return {
+      version: info.version as string,
+      source: head,
+      release: commit,
+      changed: true,
+    };
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -101,5 +116,15 @@ if (import.meta.main) {
     stderr: "inherit",
   });
   assert.equal(await audit.exited, 0, "Marketplace audit failed");
-  await publish(root);
+  const result = await publish(root);
+  const status = result.changed ? "Published" : "Already published (no push)";
+  console.log(
+    `${status}: ${result.version}; source ${result.source}; release ${result.release}`,
+  );
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    await appendFile(
+      process.env.GITHUB_STEP_SUMMARY,
+      `## Codex marketplace\n\n${status}\n\n- Version: ${result.version}\n- Source: ${result.source}\n- Release: ${result.release}\n- Remote release ref verified.\n`,
+    );
+  }
 }
