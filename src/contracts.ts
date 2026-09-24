@@ -70,12 +70,32 @@ function sameKeys(a: object, keys: string[]) {
     keys.every((k) => Object.hasOwn(a, k))
   );
 }
-// Confirmed gateways can serialize probabilities and scores to two decimals.
-// Validate whether a normalized underlying distribution can exist inside those
-// rounding intervals. Preserve reported values; do not fabricate precision.
-function roundedBounds(values: number[]) {
-  const lower = values.map((p) => Math.max(0, p - 0.005));
-  const upper = values.map((p) => Math.min(1, p + 0.005));
+function decimalPlaces(value: number) {
+  const [significand = "", exponentText] = value
+    .toString()
+    .toLowerCase()
+    .split("e");
+  const exponent = exponentText === undefined ? 0 : Number(exponentText);
+  return Math.max(0, (significand.split(".")[1]?.length ?? 0) - exponent);
+}
+function precision(values: number[]) {
+  return Math.max(0, ...values.map(decimalPlaces));
+}
+function interval(value: number, places: number, maximum: number) {
+  if (places === 0) return [value, value] as const;
+  const halfStep = 0.5 * 10 ** -places;
+  return [
+    Math.max(0, value - halfStep),
+    Math.min(maximum, value + halfStep),
+  ] as const;
+}
+// Decimal JSON numbers do not preserve trailing zeroes. Infer one shared
+// precision per numeric group and check whether a normalized underlying
+// distribution and weighted score can fit the reported rounding intervals.
+// Provider values remain untouched.
+function roundedBounds(values: number[], places: number) {
+  const lower = values.map((p) => interval(p, places, 1)[0]);
+  const upper = values.map((p) => interval(p, places, 1)[1]);
   const lowSum = lower.reduce((a, b) => a + b, 0);
   requireContract(
     lowSum <= 1 + tolerance &&
@@ -95,11 +115,7 @@ function roundedBounds(values: number[]) {
   }
   return [extreme(false), extreme(true)] as const;
 }
-export function validateResponse(
-  raw: unknown,
-  questions: Questions,
-  rounded = false,
-) {
+export function validateResponse(raw: unknown, questions: Questions) {
   const parsed = responseSchema.safeParse(raw);
   if (!parsed.success)
     throw new ResponseContractError("Invalid TypeSafe response shape");
@@ -117,18 +133,15 @@ export function validateResponse(
           : [];
     requireContract(sameKeys(a.probabilities, keys));
     const values = keys.map((k) => a.probabilities[k]!);
-    const twoDecimals = (n: number) =>
-      Math.abs(n * 100 - Math.round(n * 100)) <= tolerance;
-    const rounding =
-      rounded &&
-      values.every(twoDecimals) &&
-      (a.type !== "score" || twoDecimals(a.score));
-    const bounds = rounding ? roundedBounds(values) : undefined;
-    if (!rounding)
-      requireContract(
-        Math.abs(values.reduce((sum, p) => sum + p, 0) - 1) <= tolerance,
-      );
+    const sum = values.reduce((total, p) => total + p, 0);
+    const probabilityPlaces = precision(values);
+    const scorePlaces = a.type === "score" ? decimalPlaces(a.score) : 0;
     if (a.type === "choice") {
+      if (Math.abs(sum - 1) > tolerance) {
+        const places = probabilityPlaces;
+        requireContract(places > 0);
+        roundedBounds(values, places);
+      }
       requireContract(keys.includes(a.choice));
       requireContract(
         a.probabilities[a.choice]! + tolerance >=
@@ -144,16 +157,25 @@ export function validateResponse(
         (sum, k) => sum + Number(k) * a.probabilities[k]!,
         0,
       );
-      if (bounds)
-        requireContract(
-          a.score + 0.005 + tolerance >= bounds[0] &&
-            a.score - 0.005 - tolerance <= bounds[1],
-        );
-      else
-        requireContract(
-          Math.abs(a.score - expected) <=
-            tolerance * Math.max(1, q.criteria.length - 1),
-        );
+      if (
+        Math.abs(sum - 1) <= tolerance &&
+        Math.abs(a.score - expected) <=
+          tolerance * Math.max(1, q.criteria.length - 1)
+      )
+        continue;
+      const inferredProbabilityPlaces = probabilityPlaces || scorePlaces;
+      const inferredScorePlaces = scorePlaces || probabilityPlaces;
+      requireContract(inferredProbabilityPlaces > 0 || inferredScorePlaces > 0);
+      const expectedBounds = roundedBounds(values, inferredProbabilityPlaces);
+      const scoreBounds = interval(
+        a.score,
+        inferredScorePlaces,
+        q.criteria.length - 1,
+      );
+      requireContract(
+        scoreBounds[0] <= expectedBounds[1] + tolerance &&
+          scoreBounds[1] >= expectedBounds[0] - tolerance,
+      );
     }
   }
   return response;

@@ -122,6 +122,18 @@ test("Choice and Score cross-check candidates, probabilities, weighted value and
     expect(() =>
       validateResponse({ ...base(), answers: { q: answer } }, q),
     ).not.toThrow();
+  const roundedChoice = {
+    type: "choice",
+    choice: "a",
+    confidence: 0.34,
+    probabilities: { a: 0.33, b: 0.33, c: 0.33 },
+  };
+  expect(() =>
+    validateResponse(
+      { ...base(), answers: { q: roundedChoice } },
+      { q: { type: "choice", criteria: { a: null, b: null, c: null } } },
+    ),
+  ).not.toThrow();
   const badChoices = [
     { ...validChoice, choice: "c" },
     { ...validChoice, confidence: 2 },

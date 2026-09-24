@@ -1,6 +1,6 @@
 import { RequestScheduler, type SchedulerOptions } from "./scheduler.ts";
 import { batchOutputSchema, runBatch } from "./batch.ts";
-import { isVercel, isZen, validateProviderRequest } from "./provider.ts";
+import { validateProviderRequest } from "./provider.ts";
 import packageInfo from "../package.json";
 import { z } from "zod";
 import { toolError } from "./errors.ts";
@@ -51,11 +51,7 @@ export function createServer(
       () => client.systemOne(request, { signal }),
       signal,
     );
-    const response = validateResponse(
-      raw,
-      request.questions,
-      isZen(client.baseURL) || isVercel(client.baseURL),
-    );
+    const response = validateResponse(raw, request.questions);
     return outputSchema.parse(toResult(response));
   }
   async function assess(input: Assessment, signal: AbortSignal) {

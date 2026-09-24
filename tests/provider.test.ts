@@ -136,7 +136,7 @@ test("Zen rejects observed unsupported null inputs locally but preserves structu
   ).not.toThrow();
 });
 
-test("rounded score validation rejects impossible probability distributions", async () => {
+test("score validation infers rounding precision and rejects impossible distributions", async () => {
   const { validateResponse } = await import("../src/contracts.ts");
   const levels = [
     "Terrible",
@@ -181,8 +181,56 @@ test("rounded score validation rejects impossible probability distributions", as
     },
     usage: { input_tokens: 367, output_tokens: 17 },
   };
-  expect(() => validateResponse(response, questions)).toThrow();
-  expect(validateResponse(response, questions, true)).toEqual(response);
+  expect(validateResponse(response, questions)).toEqual(response);
+  const mixedPrecisionResponse = {
+    ...response,
+    answers: {
+      quality: { ...response.answers.quality, score: 3.740001 },
+    },
+  };
+  expect(validateResponse(mixedPrecisionResponse, questions)).toEqual(
+    mixedPrecisionResponse,
+  );
+  const officialLevels = [
+    { score: 0, label: "very poor", meaning: "Strongly negative overall" },
+    { score: 1, label: "poor", meaning: "Mostly negative" },
+    {
+      score: 2,
+      label: "mixed or average",
+      meaning: "Positive and negative evidence",
+    },
+    { score: 3, label: "good", meaning: "Mostly positive" },
+    { score: 4, label: "excellent", meaning: "Strongly positive" },
+  ];
+  const officialQuestions = {
+    experience: {
+      type: "score" as const,
+      instructions: "Rate the overall experience.",
+      criteria: officialLevels as [
+        (typeof officialLevels)[number],
+        (typeof officialLevels)[number],
+        ...(typeof officialLevels)[number][],
+      ],
+    },
+  };
+  const officialResponse = {
+    model: "jev-1.13.0",
+    answers: {
+      experience: {
+        type: "score" as const,
+        score: 2.03,
+        confidence: 0.97,
+        legend: Object.fromEntries(
+          officialLevels.map((level, index) => [index, level]),
+        ),
+        probabilities: { "0": 0, "1": 0.01, "2": 0.96, "3": 0.03, "4": 0 },
+      },
+    },
+    usage: { input_tokens: 639, output_tokens: 17 },
+  };
+  expect(validateResponse(officialResponse, officialQuestions)).toEqual(
+    officialResponse,
+  );
   expect(() =>
     validateResponse(
       {
@@ -190,7 +238,6 @@ test("rounded score validation rejects impossible probability distributions", as
         answers: { quality: { ...response.answers.quality, score: 4.1 } },
       },
       questions,
-      true,
     ),
   ).toThrow();
   expect(() =>
@@ -208,7 +255,6 @@ test("rounded score validation rejects impossible probability distributions", as
         },
       },
       questions,
-      true,
     ),
   ).toThrow();
 });
