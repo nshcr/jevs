@@ -13824,6 +13824,10 @@ function isZen(baseURL) {
   const url = new URL(baseURL);
   return url.origin === "https://opencode.ai" && url.pathname.replace(/\/$/, "") === "/zen";
 }
+function isVercel(baseURL) {
+  const url = new URL(baseURL);
+  return url.origin === "https://ai-gateway.vercel.sh" && url.pathname.replace(/\/+$/, "") === "/typesafe";
+}
 function isOpenRouter(url) {
   return url.origin === "https://openrouter.ai";
 }
@@ -15211,7 +15215,7 @@ async function runBatch(input, concurrency, signal, evaluate) {
 // package.json
 var package_default = {
   name: "jevs",
-  version: "0.1.0",
+  version: "0.1.1",
   description: "Jev structured judgments through MCP tools and a Codex plugin, using the official TypeSafe SDK and Bun",
   type: "module",
   scripts: {
@@ -23140,7 +23144,7 @@ function createServer(source, options = {}) {
     const client = getClient();
     validateProviderRequest(client.baseURL, request);
     const raw = await scheduler.run(() => client.systemOne(request, { signal }), signal);
-    const response = validateResponse(raw, request.questions, isZen(client.baseURL));
+    const response = validateResponse(raw, request.questions, isZen(client.baseURL) || isVercel(client.baseURL));
     return outputSchema.parse(toResult(response));
   }
   async function assess(input, signal) {
