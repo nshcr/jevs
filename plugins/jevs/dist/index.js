@@ -13824,10 +13824,6 @@ function isZen(baseURL) {
   const url = new URL(baseURL);
   return url.origin === "https://opencode.ai" && url.pathname.replace(/\/$/, "") === "/zen";
 }
-function isVercel(baseURL) {
-  const url = new URL(baseURL);
-  return url.origin === "https://ai-gateway.vercel.sh" && url.pathname.replace(/\/+$/, "") === "/typesafe";
-}
 function isOpenRouter(url) {
   return url.origin === "https://openrouter.ai";
 }
@@ -14039,9 +14035,26 @@ function requireContract(ok) {
 function sameKeys(a, keys) {
   return Object.keys(a).length === keys.length && keys.every((k) => Object.hasOwn(a, k));
 }
-function roundedBounds(values) {
-  const lower = values.map((p) => Math.max(0, p - 0.005));
-  const upper = values.map((p) => Math.min(1, p + 0.005));
+function decimalPlaces(value) {
+  const [significand = "", exponentText] = value.toString().toLowerCase().split("e");
+  const exponent = exponentText === undefined ? 0 : Number(exponentText);
+  return Math.max(0, (significand.split(".")[1]?.length ?? 0) - exponent);
+}
+function precision(values) {
+  return Math.max(0, ...values.map(decimalPlaces));
+}
+function interval(value, places, maximum) {
+  if (places === 0)
+    return [value, value];
+  const halfStep = 0.5 * 10 ** -places;
+  return [
+    Math.max(0, value - halfStep),
+    Math.min(maximum, value + halfStep)
+  ];
+}
+function roundedBounds(values, places) {
+  const lower = values.map((p) => interval(p, places, 1)[0]);
+  const upper = values.map((p) => interval(p, places, 1)[1]);
   const lowSum = lower.reduce((a, b) => a + b, 0);
   requireContract(lowSum <= 1 + tolerance && upper.reduce((a, b) => a + b, 0) >= 1 - tolerance);
   function extreme(reverse) {
@@ -14059,7 +14072,7 @@ function roundedBounds(values) {
   }
   return [extreme(false), extreme(true)];
 }
-function validateResponse(raw, questions, rounded = false) {
+function validateResponse(raw, questions) {
   const parsed = responseSchema.safeParse(raw);
   if (!parsed.success)
     throw new ResponseContractError("Invalid TypeSafe response shape");
@@ -14073,12 +14086,15 @@ function validateResponse(raw, questions, rounded = false) {
     const keys = q.type === "choice" ? Object.keys(q.criteria) : q.type === "score" ? q.criteria.map((_, i) => String(i)) : [];
     requireContract(sameKeys(a.probabilities, keys));
     const values = keys.map((k) => a.probabilities[k]);
-    const twoDecimals = (n) => Math.abs(n * 100 - Math.round(n * 100)) <= tolerance;
-    const rounding = rounded && values.every(twoDecimals) && (a.type !== "score" || twoDecimals(a.score));
-    const bounds = rounding ? roundedBounds(values) : undefined;
-    if (!rounding)
-      requireContract(Math.abs(values.reduce((sum, p) => sum + p, 0) - 1) <= tolerance);
+    const sum = values.reduce((total, p) => total + p, 0);
+    const probabilityPlaces = precision(values);
+    const scorePlaces = a.type === "score" ? decimalPlaces(a.score) : 0;
     if (a.type === "choice") {
+      if (Math.abs(sum - 1) > tolerance) {
+        const places = probabilityPlaces;
+        requireContract(places > 0);
+        roundedBounds(values, places);
+      }
       requireContract(keys.includes(a.choice));
       requireContract(a.probabilities[a.choice] + tolerance >= Math.max(...Object.values(a.probabilities)));
     } else if (q.type === "score") {
@@ -14086,10 +14102,14 @@ function validateResponse(raw, questions, rounded = false) {
       requireContract(sameKeys(a.legend, keys));
       requireContract(keys.every((k, i) => isDeepStrictEqual(a.legend[k], q.criteria[i])));
       const expected = keys.reduce((sum, k) => sum + Number(k) * a.probabilities[k], 0);
-      if (bounds)
-        requireContract(a.score + 0.005 + tolerance >= bounds[0] && a.score - 0.005 - tolerance <= bounds[1]);
-      else
-        requireContract(Math.abs(a.score - expected) <= tolerance * Math.max(1, q.criteria.length - 1));
+      if (Math.abs(sum - 1) <= tolerance && Math.abs(a.score - expected) <= tolerance * Math.max(1, q.criteria.length - 1))
+        continue;
+      const inferredProbabilityPlaces = probabilityPlaces || scorePlaces;
+      const inferredScorePlaces = scorePlaces || probabilityPlaces;
+      requireContract(inferredProbabilityPlaces > 0 || inferredScorePlaces > 0);
+      const expectedBounds = roundedBounds(values, inferredProbabilityPlaces);
+      const scoreBounds = interval(a.score, inferredScorePlaces, q.criteria.length - 1);
+      requireContract(scoreBounds[0] <= expectedBounds[1] + tolerance && scoreBounds[1] >= expectedBounds[0] - tolerance);
     }
   }
   return response;
@@ -15215,7 +15235,7 @@ async function runBatch(input, concurrency, signal, evaluate) {
 // package.json
 var package_default = {
   name: "jevs",
-  version: "0.1.1",
+  version: "0.1.2",
   description: "Jev structured judgments through MCP tools and a Codex plugin, using the official TypeSafe SDK and Bun",
   type: "module",
   scripts: {
@@ -23144,7 +23164,7 @@ function createServer(source, options = {}) {
     const client = getClient();
     validateProviderRequest(client.baseURL, request);
     const raw = await scheduler.run(() => client.systemOne(request, { signal }), signal);
-    const response = validateResponse(raw, request.questions, isZen(client.baseURL) || isVercel(client.baseURL));
+    const response = validateResponse(raw, request.questions);
     return outputSchema.parse(toResult(response));
   }
   async function assess(input, signal) {
