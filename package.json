@@ -1,6 +1,6 @@
 {
   "name": "jevs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Jev structured judgments through MCP tools and a Codex plugin, using the official TypeSafe SDK and Bun",
   "type": "module",
   "scripts": {
