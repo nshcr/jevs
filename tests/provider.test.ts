@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { TypeSafeClient, APIError } from "@typesafe-ai/sdk";
 import {
   providerFetch,
+  isVercel,
   validateProviderRequest,
   ProviderInputError,
   ProviderConfigurationError,
@@ -135,7 +136,7 @@ test("Zen rejects observed unsupported null inputs locally but preserves structu
   ).not.toThrow();
 });
 
-test("observed rounded score is accepted only with bounded Zen rounding", async () => {
+test("rounded score validation rejects impossible probability distributions", async () => {
   const { validateResponse } = await import("../src/contracts.ts");
   const levels = [
     "Terrible",
@@ -482,6 +483,84 @@ test("adapted gateways preserve errors, cancellation and malformed successful bo
   expect(JSON.stringify(toolError(await outcome).content)).toContain(
     "CANCELLED",
   );
+});
+
+test("Vercel MCP accepts the observed rounded score and preserves provider values", async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import(
+    "@modelcontextprotocol/sdk/inMemory.js"
+  );
+  const { createServer } = await import("../src/server.ts");
+  const baseURL = "https://ai-gateway.vercel.sh/typesafe";
+  expect([
+    isVercel(baseURL),
+    isVercel(`${baseURL}/`),
+    isVercel("https://ai-gateway.vercel.sh/other"),
+    isVercel("https://example.com/typesafe"),
+  ]).toEqual([true, true, false, false]);
+  const levels = [
+    { value: 0, description: "Missing or contradictory key evidence" },
+    {
+      value: 1,
+      description: "Some evidence is present but a key field is incomplete",
+    },
+    { value: 2, description: "All expected fields are present and consistent" },
+  ];
+  const response = {
+    model: "typesafe-ai/jev",
+    answers: {
+      quality: {
+        type: "score" as const,
+        score: 1.96,
+        confidence: 0.94,
+        legend: Object.fromEntries(
+          levels.map((value, index) => [index, value]),
+        ),
+        probabilities: { "0": 0.01, "1": 0.03, "2": 0.96 },
+      },
+    },
+    usage: { input_tokens: 392, output_tokens: 18 },
+  };
+  const sdk = new TypeSafeClient({
+    apiKey: "fixture",
+    baseURL,
+    defaultModel: "typesafe-ai/jev",
+    logLevel: "off",
+    retry: { maxRetries: 0 },
+    fetch: async () => Response.json(response),
+  });
+  const server = createServer(sdk);
+  const client = new Client({ name: "vercel-rounded-score", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  await client.connect(b);
+  try {
+    const result = await client.callTool({
+      name: "score",
+      arguments: {
+        content: { qualitySignals: { validFields: 3 } },
+        items: [
+          { id: "quality", question: "How complete is this record?", levels },
+        ],
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          id: "quality",
+          kind: "score",
+          value: 1.96,
+          probabilities: { "0": 0.01, "1": 0.03, "2": 0.96 },
+        },
+      ],
+      model: "typesafe-ai/jev",
+      usage: { inputTokens: 392, outputTokens: 18 },
+    });
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
 
 test("gateway rewrites stay scoped and catalog truncation is not hidden", async () => {

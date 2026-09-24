@@ -1,18 +1,18 @@
 # 供应商接入
 
-供应商配置和差异以本文为唯一维护入口，核对日期为 2026-09-22。MCP 工具与 skill 使用统一契约；部署者选择端点与凭据，适配层处理路径、封装、模型目录和已知输入限制。
+供应商配置、适配差异和验证范围以本文为唯一维护入口。MCP 工具与 skill 使用统一契约；部署者选择端点与凭据，适配层处理路径、封装、模型目录和已知输入限制。
 
 ## 配置与验证范围
 
 在实际运行 MCP 的进程环境设置 `TYPESAFE_API_KEY`（对应供应商的密钥）及 `TYPESAFE_BASE_URL`。`TYPESAFE_DEFAULT_MODEL` 可选；未设置时服务按下表选择默认值，工具参数 `model` 可以覆盖。切换供应商时同步删除旧的模型环境变量或改为对应 ID。不要把凭据放进工具参数或 Git。
 
-| 供应商                | TYPESAFE_BASE_URL                                             | 默认模型            | 本项目验证范围                                   |
-| --------------------- | ------------------------------------------------------------- | ------------------- | ------------------------------------------------ |
-| TypeSafe              | `https://api.typesafe.ai`（默认）                             | `jev-latest`        | 官方 SDK/协议及本地模拟测试；未记录直连推理实测  |
-| OpenCode Zen          | `https://opencode.ai/zen`                                     | `jev-1.13`          | 已有 `jev-1.13-free` 真实调用和兼容性回归测试    |
-| Vercel AI Gateway     | `https://ai-gateway.vercel.sh/typesafe`                       | `typesafe-ai/jev`   | 已尝试真实调用，账户验证返回 403；未完成推理验收 |
-| OpenRouter            | `https://openrouter.ai/api`                                   | `typesafe/jev-1.13` | 官方 SDK 契约核对及模拟适配测试；未真实调用      |
-| Cloudflare AI Gateway | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai` | `typesafe/jev`      | 官方文档核对及模拟适配测试；未真实调用           |
+| 供应商                | TYPESAFE_BASE_URL                                             | 默认模型            | 本项目验证范围                                                      |
+| --------------------- | ------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
+| TypeSafe              | `https://api.typesafe.ai`（默认）                             | `jev-latest`        | 官方 SDK/协议及本地模拟测试；未记录直连推理实测                     |
+| OpenCode Zen          | `https://opencode.ai/zen`                                     | `jev-1.13`          | 已有 `jev-1.13-free` 真实调用和兼容性回归测试                       |
+| Vercel AI Gateway     | `https://ai-gateway.vercel.sh/typesafe`                       | `typesafe-ai/jev`   | 当前配置账户的目录、Choice/Score/Noul、混合判断与双记录批量实测通过 |
+| OpenRouter            | `https://openrouter.ai/api`                                   | `typesafe/jev-1.13` | 官方 SDK 契约核对及模拟适配测试；未真实调用                         |
+| Cloudflare AI Gateway | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai` | `typesafe/jev`      | 官方文档核对及模拟适配测试；未真实调用                              |
 
 表中是本服务接受的基础地址，不是完整推理 URL；不要自行追加 `/v1`、`/systemone` 或 `/run`。无效 URL 或已知端点的错误基础路径会在调用前返回 `NOT_CONFIGURED` 和修正提示；输入内容不受支持则为 `INVALID_REQUEST`。自定义 TypeSafe 兼容地址仍可使用，但需自行验证。价格、免费额度、模型别名和账户可用性可能变化，以上状态不构成在线可用性保证。
 
@@ -38,7 +38,9 @@
 
 使用 AI Gateway 密钥。必须选择 `/typesafe` 兼容入口，SDK 继续使用 `noul` 与 TypeSafe 请求/响应。Vercel 另外提供 `/v1/evaluate` 和 AI SDK 的 `boolean` 形式；它们不是此 MCP 的接入路径，不应混用。
 
-既有实测遇到 `customer_verification_required` 的 403；这表明账户权限未满足，不能视为推理成功或普遍协议不兼容。按账户提示处理验证要求，本项目未再次使用该账户重测。模型目录也必须独立验证，不能由模型网页或推理路由推断目录成功。
+当前配置账户的模型目录返回 1 个模型；配置别名 `typesafe-ai/jev` 未出现在目录中，但推理响应成功返回该别名。Choice、Score、Noul、含结构化字段的混合判断以及两条记录的批量检查均通过 MCP 契约校验。目录与推理是独立请求，需分别检查。其他账户仍须自行验证凭据和访问权限。
+
+当前配置账户返回的 Score 概率与分数舍入到两位小数。适配器仅对 Vercel `/typesafe` 路径启用有界舍入区间校验，要求存在相容的底层概率分布和分数，并保留供应商原值，不归一化或重算。当前实测只覆盖本地配置账户，不构成其他账户的可用性承诺。
 
 来源：[TypeSafe 兼容入口公告](https://vercel.com/changelog/ai-gateway-now-supports-typesafe-clients-and-http-api-for-jev)。
 
@@ -70,4 +72,4 @@
 
 服务继续使用官方 TypeSafe JavaScript SDK。适配只作用于明确的 origin 和路径；鉴权、30 秒请求超时、取消及 HTTP 错误仍由 SDK 处理，MCP/SDK 不自动重试，不改写非成功 HTTP 响应；远端网关策略由部署者另行确认。不凭空生成模型卡、token 用量或缺失答案。无法无损接受的输入返回 `INVALID_REQUEST`；成功 HTTP 响应未满足公共契约时返回 `INVALID_RESPONSE`。
 
-模拟测试覆盖路由、请求封装、模型过滤、输入拒绝、错误和取消，只证明适配逻辑。新账户真实验收应分别检查模型目录、Choice/Score/Noul、混合结构与独立记录批量，以及结构化输入和错误恢复；记录实际 model/usage 与失败。Vercel、OpenRouter、Cloudflare 仍有上表中的真实调用缺口，不能用模拟通过代替。
+模拟测试覆盖路由、请求封装、模型过滤、输入拒绝、错误和取消，只证明适配逻辑。新账户真实验收应分别检查模型目录、Choice/Score/Noul、混合结构与独立记录批量，以及结构化输入和错误恢复；记录实际 model/usage 与失败。上表标为未实测的供应商仍没有在线调用证据，不能用模拟通过代替。

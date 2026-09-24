@@ -1,6 +1,6 @@
 import { RequestScheduler, type SchedulerOptions } from "./scheduler.ts";
 import { batchOutputSchema, runBatch } from "./batch.ts";
-import { isZen, validateProviderRequest } from "./provider.ts";
+import { isVercel, isZen, validateProviderRequest } from "./provider.ts";
 import packageInfo from "../package.json";
 import { z } from "zod";
 import { toolError } from "./errors.ts";
@@ -54,7 +54,7 @@ export function createServer(
     const response = validateResponse(
       raw,
       request.questions,
-      isZen(client.baseURL),
+      isZen(client.baseURL) || isVercel(client.baseURL),
     );
     return outputSchema.parse(toResult(response));
   }

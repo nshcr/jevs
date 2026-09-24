@@ -70,9 +70,9 @@ function sameKeys(a: object, keys: string[]) {
     keys.every((k) => Object.hasOwn(a, k))
   );
 }
-// Zen serializes probabilities and scores to two decimals. Validate whether a
-// normalized underlying distribution can exist inside those rounding intervals.
-// Preserve the reported numbers instead of fabricating precision by renormalizing.
+// Confirmed gateways can serialize probabilities and scores to two decimals.
+// Validate whether a normalized underlying distribution can exist inside those
+// rounding intervals. Preserve reported values; do not fabricate precision.
 function roundedBounds(values: number[]) {
   const lower = values.map((p) => Math.max(0, p - 0.005));
   const upper = values.map((p) => Math.min(1, p + 0.005));

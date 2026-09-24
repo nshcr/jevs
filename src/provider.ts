@@ -9,6 +9,14 @@ export function isZen(baseURL: string) {
   );
 }
 
+export function isVercel(baseURL: string) {
+  const url = new URL(baseURL);
+  return (
+    url.origin === "https://ai-gateway.vercel.sh" &&
+    url.pathname.replace(/\/+$/, "") === "/typesafe"
+  );
+}
+
 function isOpenRouter(url: URL) {
   return url.origin === "https://openrouter.ai";
 }
