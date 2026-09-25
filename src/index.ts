@@ -18,7 +18,6 @@ try {
         cloudflareGatewayId: process.env.CLOUDFLARE_AI_GATEWAY_ID,
       }),
       timeout: 30_000,
-      retry: { maxRetries: 0 },
     }));
   }, schedulerOptions(process.env));
   for (const signal of ["SIGINT", "SIGTERM"] as const) {

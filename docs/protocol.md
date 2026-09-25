@@ -27,7 +27,7 @@
 
 按 ID 关联，不依赖数组顺序。实际模型可能是别名解析后的版本。models.list 不是全部可用版本的白名单。
 
-响应校验包括必填类型、ID 集合、原语类型、选项/等级集合、0–1 概率和置信度、非负整数 token 数。Choice 必须选中最高概率候选（允许并列）；Score 检查等级范围、legend 和加权期望。概率和容差为 1e-6，评分加权误差容差为 1e-6 × max(1, 等级数−1)。不重新计算 confidence。
+响应校验检查必填字段和类型、问题 ID 与判断类型是否匹配，以及结果能否映射到公共输出。概率、置信度、评分、token 用量只检查为数字；不限制数值范围，不校验概率和、最高概率候选、评分与概率的关系，也不要求供应商回显的概率键或 legend 与请求完全一致。数字和供应商返回的 legend 原样保留，不归一化、不舍入、不重算。
 
 新增上游字段不进入公共结果。单记录评估的契约错误使该记录整体失败，不交付部分答案；`assess_batch` 保留其他记录的成功结果。所有工具声明 outputSchema；成功时结构化内容和 JSON 文本一致。
 
@@ -39,6 +39,7 @@
 {
   "error": {
     "code": "RATE_LIMITED",
+    "upstreamCode": "rate_limit_exceeded",
     "message": "Model service returned HTTP 429.",
     "action": "Wait before retrying within the caller budget.",
     "retry": "after_backoff",
@@ -48,7 +49,7 @@
 }
 ```
 
-错误结果没有成功 structuredContent。status 和 retryAfterMs 按需出现。MCP SDK 参数错误可为普通文本，不必符合此 JSON 格式。
+错误结果没有成功 structuredContent。`code` 是稳定的 MCP 分类码；`upstreamCode` 在 HTTP 错误体包含可识别的顶层或嵌套代码时出现。完整上游正文不回显。`status` 和 `retryAfterMs` 按需出现。MCP SDK 参数错误可为普通文本，不必符合此 JSON 格式。
 
 | 错误码                             | 处理                                           |
 | ---------------------------------- | ---------------------------------------------- |
@@ -61,7 +62,7 @@
 | CANCELLED                          | 不自动恢复已取消的任务                         |
 | UPSTREAM_ERROR / INTERNAL_ERROR    | 根据诊断修正条件，避免盲目重试                 |
 
-retry 为 never、after_backoff 或 caller_decision，是恢复提示而非自动操作。服务始终禁用自动重试。
+推理请求沿用 TypeSafe SDK 的重试策略，不额外禁用或实现第二层重试；当前 SDK 默认最多重试两次，并对配置的 HTTP 状态、连接错误和超时重试。`retry` 是 SDK 最终返回错误后的恢复提示，不会在 MCP 层自动触发重试。
 
 ## 多记录批量与取消
 

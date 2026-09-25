@@ -18,7 +18,7 @@
 
 ## TypeSafe
 
-官方 SDK 使用 Bearer 密钥，发送 `POST /v1/systemone`，通过 `GET /v1/models` 发现模型。推理包含 `model/state/questions`，返回 `model/answers/usage`。当前账户真实响应将 Score 与概率序列化为两位小数。MCP 对所有供应商统一按响应数字的小数精度推导舍入区间，检查是否存在相容的归一化分布与加权分数；保留供应商原值，不归一化概率或重算 Score。ID、类型、概率键及 rubric 仍按公共契约严格校验。
+官方 SDK 使用 Bearer 密钥，发送 `POST /v1/systemone`，通过 `GET /v1/models` 发现模型。推理包含 `model/state/questions`，返回 `model/answers/usage`。供应商返回的数字会按原值保留；兼容层不会因概率范围、舍入后概率和、候选顺序或评分计算关系不一致而拒绝响应。
 
 来源：[HTTP API](https://docs.typesafe.ai/api)、[JavaScript SDK](https://docs.typesafe.ai/sdk/javascript)。
 
@@ -30,7 +30,7 @@
 
 - 将 `{object: "list", data: [...]}` 模型目录转换成 MCP 模型卡，只保留 Jev；缺失描述和发布日期为空，不把目录创建时间当成发布日期。
 - 顶层 null content、null 评分等级、question/yes/no 全为 null 的 check 在发送前拒绝；嵌套 null 与 null Choice 描述保留。
-- 所有供应商共用按返回数字精度推导的舍入区间校验；必须存在合法的底层分布及一致评分。返回原值，不归一化概率或重算 score。
+- 所有供应商共用响应形状检查并保留数字原值；不校验供应商概率或评分之间的数学关系。
 
 来源：[Zen Jev 与模型目录](https://opencode.ai/docs/en/zen/#jev)。
 
@@ -40,7 +40,7 @@
 
 当前配置账户的模型目录返回 1 个模型；配置别名 `typesafe-ai/jev` 未出现在目录中，但推理响应成功返回该别名。Choice、Score、Noul、含结构化字段的混合判断以及两条记录的批量检查均通过 MCP 契约校验。目录与推理是独立请求，需分别检查。其他账户仍须自行验证凭据和访问权限。
 
-当前配置账户返回的 Score 概率与分数舍入到两位小数。通用响应校验按这些数字的显示精度检查是否存在相容的底层概率分布和分数，并保留供应商原值，不归一化或重算。当前实测只覆盖本地配置账户，不构成其他账户的可用性承诺。
+当前配置账户返回的 Score 概率与分数舍入到两位小数。兼容层保留供应商数值，不推断未舍入的概率或分数，也不因它们之间的数学关系拒绝响应。当前实测只覆盖本地配置账户，不构成其他账户的可用性承诺。
 
 来源：[TypeSafe 兼容入口公告](https://vercel.com/changelog/ai-gateway-now-supports-typesafe-clients-and-http-api-for-jev)。
 
@@ -64,12 +64,12 @@
 
 适配器发送 `POST .../ai/run`，将 SDK 正文改为 `{model, input: {state, questions}}`。接受 Jev 的直接输出，或标准 REST `{success: true, result: ...}` 信封；失败信封不会当成有效判断。模型列表使用 `.../ai/models/search?search=typesafe%2Fjev&per_page=100&format=openrouter`，只保留 `typesafe/jev`。若返回满页，拒绝将它作为完整目录，不额外发起无界翻页。
 
-尚未真实验证该供应商的响应与账户条件；通用响应校验会按返回数字的精度检验概率归一化和加权分数的一致性，但这不替代目标账户验收。文档样例不能证明所有边界输入和账户条件。网关配置的缓存、日志、限流等规则会生效；MCP/SDK 不重试不代表网关自身没有配置重试。
+尚未真实验证该供应商的响应与账户条件；通用响应校验检查响应形状，不推断概率归一化或加权分数一致性。文档样例不能证明所有边界输入和账户条件。网关配置的缓存、日志、限流等规则会生效；SDK 使用自身重试策略，网关也可能另行配置重试。
 
 来源：[AI Gateway REST API、鉴权与 gateway 选择](https://developers.cloudflare.com/ai-gateway/usage/rest-api/)、[Jev 模型及请求格式](https://developers.cloudflare.com/ai/models/typesafe/jev/)、[模型检索 API](https://developers.cloudflare.com/api/resources/ai/subresources/models/methods/list/)。
 
 ## 适配边界与验收
 
-服务继续使用官方 TypeSafe JavaScript SDK。供应商适配只作用于明确的 origin 和路径；鉴权、30 秒请求超时、取消及 HTTP 错误仍由 SDK 处理，MCP/SDK 不自动重试，不改写非成功 HTTP 响应；远端网关策略由部署者另行确认。所有供应商共用同一响应契约：精确数值满足时直接接受；否则按概率与分数各自可见的小数精度计算区间，只有存在归一化底层分布且其加权分数与响应分数区间重叠时才接受。原始响应值保持不变。不凭空生成模型卡、token 用量或缺失答案。无法无损接受的输入返回 `INVALID_REQUEST`；成功 HTTP 响应未满足公共契约时返回 `INVALID_RESPONSE`。
+服务继续使用官方 TypeSafe JavaScript SDK。供应商适配只作用于明确的 origin 和路径；鉴权、每次请求尝试 30 秒超时、取消、HTTP 错误及默认重试策略仍由 SDK 处理；适配层不改写非成功 HTTP 响应。远端网关策略由部署者另行确认。所有供应商共用同一响应形状检查：校验问题 ID、判断类型及输出所需字段，不验证供应商数值间的数学关系，不归一化、舍入或重算，并保留可映射的供应商返回值。无法无损接受的输入返回 `INVALID_REQUEST`；成功 HTTP 响应缺少必要字段或类型不受支持时返回 `INVALID_RESPONSE`。
 
 模拟测试覆盖路由、请求封装、模型过滤、输入拒绝、错误和取消，只证明适配逻辑。新账户真实验收应分别检查模型目录、Choice/Score/Noul、混合结构与独立记录批量，以及结构化输入和错误恢复；记录实际 model/usage 与失败。上表标为未实测的供应商仍没有在线调用证据，不能用模拟通过代替。

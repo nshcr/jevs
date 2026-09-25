@@ -27,12 +27,36 @@ function retryDelay(headers: Headers) {
 }
 export const errorSchema = z.object({
   code: z.string(),
+  upstreamCode: z.string().optional(),
   message: z.string(),
   action: z.string(),
   retry: z.enum(["never", "after_backoff", "caller_decision"]),
   status: z.number().int().optional(),
   retryAfterMs: z.number().nonnegative().optional(),
 });
+function upstreamErrorCode(body: unknown) {
+  if (!body || typeof body !== "object") return undefined;
+  const record = body as Record<string, unknown>;
+  const nestedError = record.error;
+  const firstError = Array.isArray(record.errors)
+    ? record.errors[0]
+    : undefined;
+  const candidates = [
+    record.code,
+    nestedError && typeof nestedError === "object"
+      ? (nestedError as Record<string, unknown>).code
+      : undefined,
+    firstError && typeof firstError === "object"
+      ? (firstError as Record<string, unknown>).code
+      : undefined,
+  ];
+  const value = candidates.find(
+    (candidate) =>
+      (typeof candidate === "string" && candidate.length > 0) ||
+      typeof candidate === "number",
+  );
+  return value === undefined ? undefined : String(value);
+}
 export function errorDetails(error: unknown): z.infer<typeof errorSchema> {
   let code = "INTERNAL_ERROR";
   let message = "Model service request failed.";
@@ -41,6 +65,7 @@ export function errorDetails(error: unknown): z.infer<typeof errorSchema> {
   let retry: z.infer<typeof errorSchema>["retry"] = "never";
   let status: number | undefined;
   let retryAfterMs: number | undefined;
+  let upstreamCode: string | undefined;
   if (error instanceof AdmissionError) {
     code = error.reason === "full" ? "LOCAL_OVERLOAD" : "QUEUE_TIMEOUT";
     message = "The local MCP request was not sent upstream.";
@@ -68,6 +93,7 @@ export function errorDetails(error: unknown): z.infer<typeof errorSchema> {
       "Report the contract failure; do not use partial results or repeat the request automatically.";
   } else if (error instanceof APIError) {
     status = error.status;
+    upstreamCode = upstreamErrorCode(error.body);
     message = `Model service returned HTTP ${status}.`;
     if (status === 401 || status === 403) {
       code = "ACCESS_DENIED";
@@ -107,6 +133,7 @@ export function errorDetails(error: unknown): z.infer<typeof errorSchema> {
   }
   return {
     code,
+    ...(upstreamCode === undefined ? {} : { upstreamCode }),
     message,
     action,
     retry,

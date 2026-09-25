@@ -40,7 +40,7 @@ const malformed: [string, unknown][] = [
       },
     },
   ],
-  ...[3, -0.1, "yes", null, undefined].map(
+  ...["yes", null, undefined].map(
     (value) =>
       [
         "invalid probability " + String(value),
@@ -92,7 +92,7 @@ test("MCP rejects malformed successful HTTP responses and advertises output sche
   }
 });
 
-test("Choice and Score cross-check candidates, probabilities, weighted value and rubric", () => {
+test("Choice and Score preserve supplier values while checking response shape", () => {
   const choice = {
     q: { type: "choice" as const, criteria: { a: null, b: null } },
   };
@@ -103,13 +103,13 @@ test("Choice and Score cross-check candidates, probabilities, weighted value and
     },
   };
   const validChoice = {
-    type: "choice",
+    type: "choice" as const,
     choice: "a",
     confidence: 0.5,
     probabilities: { a: 0.7, b: 0.3 },
   };
   const validScore = {
-    type: "score",
+    type: "score" as const,
     score: 0.7,
     confidence: 0.5,
     probabilities: { "0": 0.3, "1": 0.7 },
@@ -142,17 +142,19 @@ test("Choice and Score cross-check candidates, probabilities, weighted value and
     { ...validChoice, probabilities: { a: 1 } },
   ];
   for (const a of badChoices)
-    expect(() =>
-      validateResponse({ ...base(), answers: { q: a } }, choice),
-    ).toThrow();
+    expect(validateResponse({ ...base(), answers: { q: a } }, choice)).toEqual({
+      ...base(),
+      answers: { q: a },
+    });
   for (const a of [
     { ...validScore, score: 99 },
     { ...validScore, score: 0.2 },
     { ...validScore, legend: { "0": null, "1": "wrong" } },
   ])
-    expect(() =>
-      validateResponse({ ...base(), answers: { q: a } }, score),
-    ).toThrow();
+    expect(validateResponse({ ...base(), answers: { q: a } }, score)).toEqual({
+      ...base(),
+      answers: { q: a },
+    });
 });
 
 test("API limits and dangerous JSON keys are rejected before transformation", () => {

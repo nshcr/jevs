@@ -60,7 +60,10 @@ test("provider adapter preserves non-Zen, inference, malformed catalog and HTTP 
     logLevel: "off",
     retry: { maxRetries: 0 },
     fetch: providerFetch(async () =>
-      Response.json({}, { status: 429, headers: { "retry-after": "2" } }),
+      Response.json(
+        { error: { code: "rate_limit_error", message: "SECRET_PAYLOAD" } },
+        { status: 429, headers: { "retry-after": "2" } },
+      ),
     ),
   });
   try {
@@ -70,8 +73,10 @@ test("provider adapter preserves non-Zen, inference, malformed catalog and HTTP 
     expect(error).toBeInstanceOf(APIError);
     expect(JSON.parse(toolError(error).content[0]!.text).error).toMatchObject({
       code: "RATE_LIMITED",
+      upstreamCode: "rate_limit_error",
       retryAfterMs: 2000,
     });
+    expect(JSON.stringify(toolError(error))).not.toContain("SECRET_PAYLOAD");
   }
 });
 
@@ -136,7 +141,7 @@ test("Zen rejects observed unsupported null inputs locally but preserves structu
   ).not.toThrow();
 });
 
-test("score validation infers rounding precision and rejects impossible distributions", async () => {
+test("score validation preserves provider values despite range or distribution differences", async () => {
   const { validateResponse } = await import("../src/contracts.ts");
   const levels = [
     "Terrible",
@@ -231,32 +236,26 @@ test("score validation infers rounding precision and rejects impossible distribu
   expect(validateResponse(officialResponse, officialQuestions)).toEqual(
     officialResponse,
   );
-  expect(() =>
-    validateResponse(
-      {
-        ...response,
-        answers: { quality: { ...response.answers.quality, score: 4.1 } },
-      },
-      questions,
-    ),
-  ).toThrow();
-  expect(() =>
-    validateResponse(
-      {
-        ...response,
-        answers: {
-          quality: {
-            ...response.answers.quality,
-            probabilities: {
-              ...response.answers.quality.probabilities,
-              "3": 0.8,
-            },
-          },
+  const outOfRangeScore = {
+    ...response,
+    answers: { quality: { ...response.answers.quality, score: 10.4 } },
+  };
+  expect(validateResponse(outOfRangeScore, questions)).toEqual(outOfRangeScore);
+  const inconsistentDistribution = {
+    ...response,
+    answers: {
+      quality: {
+        ...response.answers.quality,
+        probabilities: {
+          ...response.answers.quality.probabilities,
+          "3": 0.8,
         },
       },
-      questions,
-    ),
-  ).toThrow();
+    },
+  };
+  expect(validateResponse(inconsistentDistribution, questions)).toEqual(
+    inconsistentDistribution,
+  );
 });
 
 test("MCP reports Zen admission errors before issuing HTTP requests", async () => {

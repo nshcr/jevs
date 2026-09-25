@@ -12,7 +12,7 @@ The MCP covers Choice (`classify`), Score (`score`), Noul (`check`), mixed judgm
 
 ## Results and validation
 
-Contract validation checks response shapes, ID/type matching, probabilities, choices and scores; it does not guarantee truth or accuracy. A contract failure rejects all judgments for the affected record. Other successful records in `assess_batch` remain usable.
+Contract validation checks response shapes and the requested IDs/types. Numeric fields are passed through as returned: the MCP does not clamp, normalize, round or recalculate probabilities, confidence, scores or token usage, and does not reject mathematical inconsistencies between them. A shape failure rejects the affected record; other successful records in `assess_batch` remain usable.
 
 Returned probabilities and scores may be rounded. Their displayed sum or weighted mean may differ slightly; preserve original values instead of normalizing them or claiming extra precision. A score is an expected rubric position; a check is a probability, not intensity. Confidence is not authorization to act.
 
@@ -22,11 +22,11 @@ Returned probabilities and scores may be rounded. Their displayed sum or weighte
 
 The local scheduler defaults to 4 in-flight upstream requests, 32 queued requests and a 1000ms queue wait. Server configuration may change these limits; they do not guarantee remote capacity. `LOCAL_OVERLOAD` and `QUEUE_TIMEOUT` mean no upstream request was sent for the affected record.
 
-The SDK timeout is 30 seconds per dispatched HTTP request, excluding queue time. It is not a deadline for an entire batch. Choose smaller batches or a suitable MCP host deadline. Cancellation stops unsent work and propagates to active requests. A timeout or cancellation does not prove upstream work was never performed or billed. The server never retries automatically.
+The SDK timeout is 30 seconds per request attempt, excluding queue time. The SDK's default retry policy may add attempts for eligible HTTP statuses, connection failures and timeouts; its current default is two retries. This is not a deadline for an entire batch. Choose smaller batches or a suitable MCP host deadline. Cancellation stops unsent work and propagates to active requests. A timeout or cancellation does not prove upstream work was never performed or billed.
 
 ## Error recovery
 
-First check top-level `isError`. Server failures return JSON text with `{error: {code, message, action, retry}}`; HTTP failures also include `status`, and applicable service failures may include `retryAfterMs`. These failures have no success `structuredContent`. MCP SDK input validation errors may instead be plain text.
+First check top-level `isError`. Server failures return JSON text with `{error: {code, upstreamCode?, message, action, retry}}`; HTTP failures also include `status`, and applicable service failures may include `retryAfterMs`. `code` is the MCP compatibility category; `upstreamCode` is included when a provider error body has a recognizable code. The rest of the body is not echoed. These failures have no success `structuredContent`. MCP SDK input validation errors may instead be plain text.
 
 For a successful `assess_batch` envelope, inspect each record's `status` and apply the same recovery rules to its `error` object. Retry only eligible failed records. Never convert an error or missing result into a negative judgment.
 
