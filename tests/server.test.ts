@@ -175,7 +175,7 @@ test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model lis
 });
 
 for (const status of [401, 429, 500]) {
-  test(`HTTP ${status} becomes sanitized MCP tool error without retries`, async () => {
+  test(`HTTP ${status} becomes a sanitized MCP error after one configured attempt`, async () => {
     let calls = 0;
     const sdk = new TypeSafeClient({
       baseURL: "https://api.typesafe.ai",

@@ -18,7 +18,7 @@
 
 ## TypeSafe
 
-官方 SDK 使用 Bearer 密钥，发送 `POST /v1/systemone`，通过 `GET /v1/models` 发现模型。推理包含 `model/state/questions`，返回 `model/answers/usage`。供应商返回的数字会按原值保留；兼容层不会因概率范围、舍入后概率和、候选顺序或评分计算关系不一致而拒绝响应。
+官方 SDK 使用 Bearer 密钥，发送 `POST /v1/systemone`，通过 `GET /v1/models` 发现模型。推理请求包含 `model/state/questions`，响应包含 `model/answers/usage`。当前账户实测的评分与概率保留两位小数。
 
 来源：[HTTP API](https://docs.typesafe.ai/api)、[JavaScript SDK](https://docs.typesafe.ai/sdk/javascript)。
 
@@ -30,7 +30,6 @@
 
 - 将 `{object: "list", data: [...]}` 模型目录转换成 MCP 模型卡，只保留 Jev；缺失描述和发布日期为空，不把目录创建时间当成发布日期。
 - 顶层 null content、null 评分等级、question/yes/no 全为 null 的 check 在发送前拒绝；嵌套 null 与 null Choice 描述保留。
-- 所有供应商共用响应形状检查并保留数字原值；不校验供应商概率或评分之间的数学关系。
 
 来源：[Zen Jev 与模型目录](https://opencode.ai/docs/en/zen/#jev)。
 
@@ -39,8 +38,6 @@
 使用 AI Gateway 密钥。必须选择 `/typesafe` 兼容入口，SDK 继续使用 `noul` 与 TypeSafe 请求/响应。Vercel 另外提供 `/v1/evaluate` 和 AI SDK 的 `boolean` 形式；它们不是此 MCP 的接入路径，不应混用。
 
 当前配置账户的模型目录返回 1 个模型；配置别名 `typesafe-ai/jev` 未出现在目录中，但推理响应成功返回该别名。Choice、Score、Noul、含结构化字段的混合判断以及两条记录的批量检查均通过 MCP 契约校验。目录与推理是独立请求，需分别检查。其他账户仍须自行验证凭据和访问权限。
-
-当前配置账户返回的 Score 概率与分数舍入到两位小数。兼容层保留供应商数值，不推断未舍入的概率或分数，也不因它们之间的数学关系拒绝响应。当前实测只覆盖本地配置账户，不构成其他账户的可用性承诺。
 
 来源：[TypeSafe 兼容入口公告](https://vercel.com/changelog/ai-gateway-now-supports-typesafe-clients-and-http-api-for-jev)。
 
@@ -64,7 +61,7 @@
 
 适配器发送 `POST .../ai/run`，将 SDK 正文改为 `{model, input: {state, questions}}`。接受 Jev 的直接输出，或标准 REST `{success: true, result: ...}` 信封；失败信封不会当成有效判断。模型列表使用 `.../ai/models/search?search=typesafe%2Fjev&per_page=100&format=openrouter`，只保留 `typesafe/jev`。若返回满页，拒绝将它作为完整目录，不额外发起无界翻页。
 
-尚未真实验证该供应商的响应与账户条件；通用响应校验检查响应形状，不推断概率归一化或加权分数一致性。文档样例不能证明所有边界输入和账户条件。网关配置的缓存、日志、限流等规则会生效；SDK 使用自身重试策略，网关也可能另行配置重试。
+尚未真实验证该供应商的响应与账户条件。文档样例不能证明所有边界输入和账户条件。网关配置的缓存、日志、限流等规则会生效；SDK 使用自身重试策略，网关也可能另行配置重试。
 
 来源：[AI Gateway REST API、鉴权与 gateway 选择](https://developers.cloudflare.com/ai-gateway/usage/rest-api/)、[Jev 模型及请求格式](https://developers.cloudflare.com/ai/models/typesafe/jev/)、[模型检索 API](https://developers.cloudflare.com/api/resources/ai/subresources/models/methods/list/)。
 

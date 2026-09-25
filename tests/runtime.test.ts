@@ -80,7 +80,7 @@ test("cancelling one concurrent call aborts its SDK request without affecting an
   }
 });
 
-test("SDK timeout returns recoverable diagnostic and never retries automatically", async () => {
+test("SDK timeout reports an unknown completion with retries disabled", async () => {
   let calls = 0,
     aborts = 0;
   const ctx = await connect(

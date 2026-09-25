@@ -74,10 +74,6 @@
 
 MCP 取消信号贯穿队列和 SDK：移除等待项、取消进行中的请求、停止提交批量剩余项。SDK 的单请求超时仍从开始执行计算；它不包含排队，也不是整个 batch 的期限。宿主的整体超时应按批量规模设置，或缩小批次。单个 `assess_batch` 必须等待该批记录全部结束才返回，不是流式结果接口。
 
-## 接入与适配
-
-调用方使用统一工具参数和返回结构；供应商配置与适配细节集中在 [供应商接入](providers.md)。不能无损兼容的输入会返回 `INVALID_REQUEST` 和具体 `action`，不会自动改变判断含义。Skill 只描述 Jev 能力、公共 MCP 契约和通用恢复规则。
-
 ## 参考
 
 - [TypeSafe HTTP Reference](https://docs.typesafe.ai/api)

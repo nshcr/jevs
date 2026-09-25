@@ -62,7 +62,7 @@ codex plugin add jevs@jevs
 
 `jev_guide` 提供 `overview`、`patterns`、`examples`、`limits`、`sources`，也可通过 `jevs://guide/<topic>` 资源读取。插件内置 [调用 skill](skills/jev-mcp/SKILL.md)，覆盖多标签、重排、分层分类、组合评分和证据校验。
 
-同一上下文的独立问题可合并调用；不同记录使用 `assess_batch`，逐条检查 `records[].status`。后续问题依赖前次答案时，由调用方构造下一次请求。Jev 返回判断与概率，不生成自由文本，不执行动作，也不保证事实正确。
+不同记录使用 `assess_batch`，逐条检查 `records[].status`。Jev 返回判断与概率，不生成自由文本，不执行动作，也不保证事实正确。
 
 调用内容会发送给配置的服务商。SDK 每次请求尝试超时 30 秒，并按 SDK 默认策略重试符合条件的失败；取消或超时不代表远端未执行或未计费。服务不持久化输入，stdout 仅承载 MCP 协议；错误会保留可识别的供应商错误码，不回显完整错误正文。供应商差异由 MCP 适配层处理；配置与适配边界见 [供应商接入](docs/providers.md)，调用方按统一工具契约及错误提示处理。
 
@@ -86,13 +86,9 @@ bun run verify
 
 服务等待 stdin 上的 MCP 消息，没有终端交互界面。需要真实推理时，复制 `.env.example` 为 `.env` 并配置密钥。
 
-`verify` 只使用本地 HTTP fixture 和临时 Git 仓库，不调用外部服务，也不发布。调度与请求形态见 [性能与负载控制](docs/performance.md)。
-
 ## 发布与许可
 
-`bun run verify` 生成 `artifacts/marketplace/`；`dist/` 和 `artifacts/` 不纳入源码 Git。维护者从 main 手动触发 **Publish Codex marketplace**，将插件目录发布到同仓库 release 分支。版本管理和发布检查见 [构建与发布](docs/releases.md)。
-
-项目采用 [MIT 许可证](LICENSE)。第三方依赖保留各自许可证，发布目录附带许可证清单。
+项目采用 [MIT 许可证](LICENSE)；发布和回滚流程见 [构建与发布](docs/releases.md)。
 
 ## 文档
 

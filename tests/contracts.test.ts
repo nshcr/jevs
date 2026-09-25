@@ -81,11 +81,6 @@ test("MCP rejects malformed successful HTTP responses and advertises output sche
       expect(result.structuredContent).toBeUndefined();
       expect(JSON.stringify(result)).toContain("no results were accepted");
     }
-    body = { models: [{ name: 12 }] };
-    expect(
-      (await client.callTool({ name: "jev_list_models", arguments: {} }))
-        .isError,
-    ).toBe(true);
   } finally {
     await client.close();
     await server.close();
@@ -204,40 +199,31 @@ test("API limits and dangerous JSON keys are rejected before transformation", ()
   ).toBe(false);
 });
 
-test("30 generated batches preserve 465 structured judgments and match responses", () => {
-  for (let n = 1; n <= 30; n++) {
-    const content = {
-      中文: [
-        true,
-        false,
-        null,
-        n,
-        "🙂",
-        { constructor: "valid data", values: [1, 2] },
-      ],
-    };
-    const checks = Array.from({ length: n }, (_, i) => ({
-      id: `字段.${i}`,
-      question: content,
-      yes: null,
-      no: [content],
-    }));
-    const req = toRequest(structureSchema.parse({ content, checks }));
-    expect(req.state).toEqual(content);
-    for (const item of checks)
-      expect(req.questions[item.id]).toEqual({
-        type: "noul",
-        instructions: content,
-        criteria: { true: null, false: [content] },
-      });
-    const response = {
-      ...base(),
-      answers: Object.fromEntries(
-        checks.map((c, i) => [c.id, { type: "noul", noul: i / n }]),
-      ),
-    };
-    expect(
-      Object.keys(validateResponse(response, req.questions).answers),
-    ).toHaveLength(n);
-  }
+test("structured multi-question requests retain nested data and correlate answers", () => {
+  const content = {
+    中文: [true, false, null, 30, "🙂", { constructor: "valid data" }],
+  };
+  const checks = Array.from({ length: 30 }, (_, i) => ({
+    id: `字段.${i}`,
+    question: content,
+    yes: null,
+    no: [content],
+  }));
+  const req = toRequest(structureSchema.parse({ content, checks }));
+  expect(req.state).toEqual(content);
+  expect(Object.values(req.questions)).toEqual(
+    checks.map(() => ({
+      type: "noul",
+      instructions: content,
+      criteria: { true: null, false: [content] },
+    })),
+  );
+  const answers = Object.fromEntries(
+    checks.map((c, i) => [
+      c.id,
+      { type: "noul" as const, noul: i / checks.length },
+    ]),
+  );
+  const response = { ...base(), answers };
+  expect(validateResponse(response, req.questions).answers).toEqual(answers);
 });

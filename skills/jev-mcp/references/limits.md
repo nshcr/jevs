@@ -14,7 +14,7 @@ The MCP covers Choice (`classify`), Score (`score`), Noul (`check`), mixed judgm
 
 Contract validation checks response shapes and the requested IDs/types. Numeric fields are passed through as returned: the MCP does not clamp, normalize, round or recalculate probabilities, confidence, scores or token usage, and does not reject mathematical inconsistencies between them. A shape failure rejects the affected record; other successful records in `assess_batch` remain usable.
 
-Returned probabilities and scores may be rounded. Their displayed sum or weighted mean may differ slightly; preserve original values instead of normalizing them or claiming extra precision. A score is an expected rubric position; a check is a probability, not intensity. Confidence is not authorization to act.
+A score is an expected rubric position; a check is a probability, not intensity. Confidence is not authorization to act.
 
 ## Scheduling, deadlines and cancellation
 
