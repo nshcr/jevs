@@ -13972,7 +13972,6 @@ function validateProviderRequest(baseURL, request) {
 }
 
 // src/contracts.ts
-import { isDeepStrictEqual } from "util";
 function safeJson(schema) {
   return preprocess((value, ctx) => {
     const pending = [value];
@@ -13998,7 +13997,7 @@ var entry = safeJson(union([
   array(json()),
   _null3()
 ]));
-var probability = number2().min(0).max(1);
+var probability = number2();
 var distribution = record(string2(), probability);
 var answer = discriminatedUnion("type", [
   object({
@@ -14009,7 +14008,7 @@ var answer = discriminatedUnion("type", [
   }),
   object({
     type: literal("score"),
-    score: number2().min(0),
+    score: number2(),
     confidence: probability,
     probabilities: distribution,
     legend: record(string2(), entry)
@@ -14020,57 +14019,19 @@ var responseSchema = safeJson(object({
   model: string2().min(1),
   answers: record(string2(), answer),
   usage: object({
-    input_tokens: number2().int().nonnegative(),
-    output_tokens: number2().int().nonnegative()
+    input_tokens: number2(),
+    output_tokens: number2()
   })
 }));
 
 class ResponseContractError extends Error {
 }
-var tolerance = 0.000001;
 function requireContract(ok) {
   if (!ok)
     throw new ResponseContractError("Invalid TypeSafe response contract");
 }
 function sameKeys(a, keys) {
   return Object.keys(a).length === keys.length && keys.every((k) => Object.hasOwn(a, k));
-}
-function decimalPlaces(value) {
-  const [significand = "", exponentText] = value.toString().toLowerCase().split("e");
-  const exponent = exponentText === undefined ? 0 : Number(exponentText);
-  return Math.max(0, (significand.split(".")[1]?.length ?? 0) - exponent);
-}
-function precision(values) {
-  return Math.max(0, ...values.map(decimalPlaces));
-}
-function interval(value, places, maximum) {
-  if (places === 0)
-    return [value, value];
-  const halfStep = 0.5 * 10 ** -places;
-  return [
-    Math.max(0, value - halfStep),
-    Math.min(maximum, value + halfStep)
-  ];
-}
-function roundedBounds(values, places) {
-  const lower = values.map((p) => interval(p, places, 1)[0]);
-  const upper = values.map((p) => interval(p, places, 1)[1]);
-  const lowSum = lower.reduce((a, b) => a + b, 0);
-  requireContract(lowSum <= 1 + tolerance && upper.reduce((a, b) => a + b, 0) >= 1 - tolerance);
-  function extreme(reverse) {
-    let remaining = Math.max(0, 1 - lowSum);
-    let result = lower.reduce((sum, p, i) => sum + i * p, 0);
-    const indices = values.map((_, i) => i);
-    if (reverse)
-      indices.reverse();
-    for (const i of indices) {
-      const mass = Math.min(remaining, upper[i] - lower[i]);
-      result += i * mass;
-      remaining -= mass;
-    }
-    return result;
-  }
-  return [extreme(false), extreme(true)];
 }
 function validateResponse(raw, questions) {
   const parsed = responseSchema.safeParse(raw);
@@ -14081,36 +14042,6 @@ function validateResponse(raw, questions) {
   for (const [id, q] of Object.entries(questions)) {
     const a = response.answers[id];
     requireContract(a.type === q.type);
-    if (a.type === "noul")
-      continue;
-    const keys = q.type === "choice" ? Object.keys(q.criteria) : q.type === "score" ? q.criteria.map((_, i) => String(i)) : [];
-    requireContract(sameKeys(a.probabilities, keys));
-    const values = keys.map((k) => a.probabilities[k]);
-    const sum = values.reduce((total, p) => total + p, 0);
-    const probabilityPlaces = precision(values);
-    const scorePlaces = a.type === "score" ? decimalPlaces(a.score) : 0;
-    if (a.type === "choice") {
-      if (Math.abs(sum - 1) > tolerance) {
-        const places = probabilityPlaces;
-        requireContract(places > 0);
-        roundedBounds(values, places);
-      }
-      requireContract(keys.includes(a.choice));
-      requireContract(a.probabilities[a.choice] + tolerance >= Math.max(...Object.values(a.probabilities)));
-    } else if (q.type === "score") {
-      requireContract(a.score <= q.criteria.length - 1);
-      requireContract(sameKeys(a.legend, keys));
-      requireContract(keys.every((k, i) => isDeepStrictEqual(a.legend[k], q.criteria[i])));
-      const expected = keys.reduce((sum, k) => sum + Number(k) * a.probabilities[k], 0);
-      if (Math.abs(sum - 1) <= tolerance && Math.abs(a.score - expected) <= tolerance * Math.max(1, q.criteria.length - 1))
-        continue;
-      const inferredProbabilityPlaces = probabilityPlaces || scorePlaces;
-      const inferredScorePlaces = scorePlaces || probabilityPlaces;
-      requireContract(inferredProbabilityPlaces > 0 || inferredScorePlaces > 0);
-      const expectedBounds = roundedBounds(values, inferredProbabilityPlaces);
-      const scoreBounds = interval(a.score, inferredScorePlaces, q.criteria.length - 1);
-      requireContract(scoreBounds[0] <= expectedBounds[1] + tolerance && scoreBounds[1] >= expectedBounds[0] - tolerance);
-    }
   }
   return response;
 }
@@ -14126,7 +14057,7 @@ var outputSchema = object({
     object({
       id: string2(),
       kind: literal("score"),
-      value: number2().nonnegative(),
+      value: number2(),
       confidence: probability,
       probabilities: distribution,
       levels: record(string2(), entry)
@@ -14135,8 +14066,8 @@ var outputSchema = object({
   ])),
   model: string2().min(1),
   usage: object({
-    inputTokens: number2().int().nonnegative(),
-    outputTokens: number2().int().nonnegative()
+    inputTokens: number2(),
+    outputTokens: number2()
   })
 });
 var modelsSchema = object({
@@ -14163,12 +14094,27 @@ function retryDelay(headers) {
 }
 var errorSchema = object({
   code: string2(),
+  upstreamCode: string2().optional(),
   message: string2(),
   action: string2(),
   retry: _enum(["never", "after_backoff", "caller_decision"]),
   status: number2().int().optional(),
   retryAfterMs: number2().nonnegative().optional()
 });
+function upstreamErrorCode(body) {
+  if (!body || typeof body !== "object")
+    return;
+  const record = body;
+  const nestedError = record.error;
+  const firstError = Array.isArray(record.errors) ? record.errors[0] : undefined;
+  const candidates = [
+    record.code,
+    nestedError && typeof nestedError === "object" ? nestedError.code : undefined,
+    firstError && typeof firstError === "object" ? firstError.code : undefined
+  ];
+  const value = candidates.find((candidate) => typeof candidate === "string" && candidate.length > 0 || typeof candidate === "number");
+  return value === undefined ? undefined : String(value);
+}
 function errorDetails(error) {
   let code = "INTERNAL_ERROR";
   let message = "Model service request failed.";
@@ -14176,6 +14122,7 @@ function errorDetails(error) {
   let retry = "never";
   let status;
   let retryAfterMs;
+  let upstreamCode;
   if (error instanceof AdmissionError) {
     code = error.reason === "full" ? "LOCAL_OVERLOAD" : "QUEUE_TIMEOUT";
     message = "The local MCP request was not sent upstream.";
@@ -14199,6 +14146,7 @@ function errorDetails(error) {
     action = "Report the contract failure; do not use partial results or repeat the request automatically.";
   } else if (error instanceof APIError) {
     status = error.status;
+    upstreamCode = upstreamErrorCode(error.body);
     message = `Model service returned HTTP ${status}.`;
     if (status === 401 || status === 403) {
       code = "ACCESS_DENIED";
@@ -14227,6 +14175,7 @@ function errorDetails(error) {
   }
   return {
     code,
+    ...upstreamCode === undefined ? {} : { upstreamCode },
     message,
     action,
     retry,
@@ -15235,7 +15184,7 @@ async function runBatch(input, concurrency, signal, evaluate) {
 // package.json
 var package_default = {
   name: "jevs",
-  version: "0.1.2",
+  version: "0.1.3",
   description: "Jev structured judgments through MCP tools and a Codex plugin, using the official TypeSafe SDK and Bun",
   type: "module",
   scripts: {
@@ -15320,7 +15269,7 @@ Independent-question and record batching follow the entry guide. Extra judgments
 `;
 
 // skills/jev-mcp/references/limits.md
-var limits_default = "# Capability boundaries and operation\n\n## Inputs and model selection\n\nThe MCP covers Choice (`classify`), Score (`score`), Noul (`check`), mixed judgments and independent records. Workflow composition stays with the caller. Jev consumes text/JSON; convert images, audio, video or binaries before calling. A URL alone does not cause retrieval.\n\n- Choice requires 2\u2013255 options; Score requires 2\u201310 ordered levels. Each evaluation needs at least one judgment. IDs must be nonblank and unique across judgment groups. The JSON key and ID `__proto__` are rejected; ordinary `constructor` keys are allowed.\n- Content, questions and criterion descriptions accept strings, objects, arrays or null; nested JSON supports numbers and booleans. `question` is required even when null. No raw SDK envelope is needed.\n- Use the same MCP arguments for every configured backend. The server handles compatibility checks and response adaptation. If an input cannot be accepted, follow `error.action`; do not invent a replacement value or silently change its meaning.\n- Model context limits and language support may vary; this guidance does not promise a fixed context budget. The MCP has no official tokenizer or exact local token admission. Reduce or partition evidence deliberately after context errors; do not truncate silently. Test judgment quality on representative content and languages.\n- Model aliases can move. Preserve the returned `model`; pass a version explicitly for reproducible evaluations. `jev_list_models` may list aliases without every accepted versioned ID, so an absent version is not automatically invalid. Model descriptions and release dates may be empty when unavailable.\n\n## Results and validation\n\nContract validation checks response shapes, ID/type matching, probabilities, choices and scores; it does not guarantee truth or accuracy. A contract failure rejects all judgments for the affected record. Other successful records in `assess_batch` remain usable.\n\nReturned probabilities and scores may be rounded. Their displayed sum or weighted mean may differ slightly; preserve original values instead of normalizing them or claiming extra precision. A score is an expected rubric position; a check is a probability, not intensity. Confidence is not authorization to act.\n\n## Scheduling, deadlines and cancellation\n\n`assess_batch` accepts 1\u201332 independent records with shared judgment definitions. Record IDs and question IDs are separate namespaces. Each record has `status: \"ok\"` with `result`, or `status: \"error\"` with `error`. Inspect each record even when the top-level call succeeds; every record can fail within a successful batch envelope. Results arrive after the whole batch settles, not as a stream.\n\nThe local scheduler defaults to 4 in-flight upstream requests, 32 queued requests and a 1000ms queue wait. Server configuration may change these limits; they do not guarantee remote capacity. `LOCAL_OVERLOAD` and `QUEUE_TIMEOUT` mean no upstream request was sent for the affected record.\n\nThe SDK timeout is 30 seconds per dispatched HTTP request, excluding queue time. It is not a deadline for an entire batch. Choose smaller batches or a suitable MCP host deadline. Cancellation stops unsent work and propagates to active requests. A timeout or cancellation does not prove upstream work was never performed or billed. The server never retries automatically.\n\n## Error recovery\n\nFirst check top-level `isError`. Server failures return JSON text with `{error: {code, message, action, retry}}`; HTTP failures also include `status`, and applicable service failures may include `retryAfterMs`. These failures have no success `structuredContent`. MCP SDK input validation errors may instead be plain text.\n\nFor a successful `assess_batch` envelope, inspect each record's `status` and apply the same recovery rules to its `error` object. Retry only eligible failed records. Never convert an error or missing result into a negative judgment.\n\n| Code                               | Caller action                                                                                                     |\n| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- |\n| NOT_CONFIGURED / ACCESS_DENIED     | Fix server credentials or permissions; restart after changing configuration.                                      |\n| INVALID_REQUEST                    | Revise the model, options, rubric or context as directed.                                                         |\n| INVALID_RESPONSE                   | Discard judgments for the affected record; investigate the contract mismatch rather than repeating automatically. |\n| RATE_LIMITED / SERVICE_UNAVAILABLE | Respect `retryAfterMs` when supplied; otherwise use bounded backoff within the caller budget.                     |\n| LOCAL_OVERLOAD / QUEUE_TIMEOUT     | Reduce concurrency or batch size; retry with bounded backoff if the caller deadline permits.                      |\n| TIMEOUT / CONNECTION_ERROR         | Upstream completion is unknown; consider duplicate cost before retrying.                                          |\n| CANCELLED                          | Do not automatically resume a cancelled task. The client may observe local cancellation instead of a tool result. |\n| UPSTREAM_ERROR / INTERNAL_ERROR    | Inspect the diagnostic and correct conditions; avoid blind retries.                                               |\n\n`retry` is `never`, `after_backoff` or `caller_decision`. It is guidance, not an automatic operation.\n\n## Data and local guidance\n\nInference sends content and questions to the remote model service configured by the server operator. The MCP does not retrieve files, persist inputs or execute returned actions. API credentials remain in server configuration.\n\n`jev_guide` and guide resources use packaged local content without inference. Tool discovery and guidance require no API key; inference and model listing require one. Use the sources topic for official references when current Jev capability information is needed.\n";
+var limits_default = "# Capability boundaries and operation\n\n## Inputs and model selection\n\nThe MCP covers Choice (`classify`), Score (`score`), Noul (`check`), mixed judgments and independent records. Workflow composition stays with the caller. Jev consumes text/JSON; convert images, audio, video or binaries before calling. A URL alone does not cause retrieval.\n\n- Choice requires 2\u2013255 options; Score requires 2\u201310 ordered levels. Each evaluation needs at least one judgment. IDs must be nonblank and unique across judgment groups. The JSON key and ID `__proto__` are rejected; ordinary `constructor` keys are allowed.\n- Content, questions and criterion descriptions accept strings, objects, arrays or null; nested JSON supports numbers and booleans. `question` is required even when null. No raw SDK envelope is needed.\n- Use the same MCP arguments for every configured backend. The server handles compatibility checks and response adaptation. If an input cannot be accepted, follow `error.action`; do not invent a replacement value or silently change its meaning.\n- Model context limits and language support may vary; this guidance does not promise a fixed context budget. The MCP has no official tokenizer or exact local token admission. Reduce or partition evidence deliberately after context errors; do not truncate silently. Test judgment quality on representative content and languages.\n- Model aliases can move. Preserve the returned `model`; pass a version explicitly for reproducible evaluations. `jev_list_models` may list aliases without every accepted versioned ID, so an absent version is not automatically invalid. Model descriptions and release dates may be empty when unavailable.\n\n## Results and validation\n\nContract validation checks response shapes and the requested IDs/types. Numeric fields are passed through as returned: the MCP does not clamp, normalize, round or recalculate probabilities, confidence, scores or token usage, and does not reject mathematical inconsistencies between them. A shape failure rejects the affected record; other successful records in `assess_batch` remain usable.\n\nA score is an expected rubric position; a check is a probability, not intensity. Confidence is not authorization to act.\n\n## Scheduling, deadlines and cancellation\n\n`assess_batch` accepts 1\u201332 independent records with shared judgment definitions. Record IDs and question IDs are separate namespaces. Each record has `status: \"ok\"` with `result`, or `status: \"error\"` with `error`. Inspect each record even when the top-level call succeeds; every record can fail within a successful batch envelope. Results arrive after the whole batch settles, not as a stream.\n\nThe local scheduler defaults to 4 in-flight upstream requests, 32 queued requests and a 1000ms queue wait. Server configuration may change these limits; they do not guarantee remote capacity. `LOCAL_OVERLOAD` and `QUEUE_TIMEOUT` mean no upstream request was sent for the affected record.\n\nThe SDK timeout is 30 seconds per request attempt, excluding queue time. The SDK's default retry policy may add attempts for eligible HTTP statuses, connection failures and timeouts; its current default is two retries. This is not a deadline for an entire batch. Choose smaller batches or a suitable MCP host deadline. Cancellation stops unsent work and propagates to active requests. A timeout or cancellation does not prove upstream work was never performed or billed.\n\n## Error recovery\n\nFirst check top-level `isError`. Server failures return JSON text with `{error: {code, upstreamCode?, message, action, retry}}`; HTTP failures also include `status`, and applicable service failures may include `retryAfterMs`. `code` is the MCP compatibility category; `upstreamCode` is included when a provider error body has a recognizable code. The rest of the body is not echoed. These failures have no success `structuredContent`. MCP SDK input validation errors may instead be plain text.\n\nFor a successful `assess_batch` envelope, inspect each record's `status` and apply the same recovery rules to its `error` object. Retry only eligible failed records. Never convert an error or missing result into a negative judgment.\n\n| Code                               | Caller action                                                                                                     |\n| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- |\n| NOT_CONFIGURED / ACCESS_DENIED     | Fix server credentials or permissions; restart after changing configuration.                                      |\n| INVALID_REQUEST                    | Revise the model, options, rubric or context as directed.                                                         |\n| INVALID_RESPONSE                   | Discard judgments for the affected record; investigate the contract mismatch rather than repeating automatically. |\n| RATE_LIMITED / SERVICE_UNAVAILABLE | Respect `retryAfterMs` when supplied; otherwise use bounded backoff within the caller budget.                     |\n| LOCAL_OVERLOAD / QUEUE_TIMEOUT     | Reduce concurrency or batch size; retry with bounded backoff if the caller deadline permits.                      |\n| TIMEOUT / CONNECTION_ERROR         | Upstream completion is unknown; consider duplicate cost before retrying.                                          |\n| CANCELLED                          | Do not automatically resume a cancelled task. The client may observe local cancellation instead of a tool result. |\n| UPSTREAM_ERROR / INTERNAL_ERROR    | Inspect the diagnostic and correct conditions; avoid blind retries.                                               |\n\n`retry` is `never`, `after_backoff` or `caller_decision`. It is guidance, not an automatic operation.\n\n## Data and local guidance\n\nInference sends content and questions to the remote model service configured by the server operator. The MCP does not retrieve files, persist inputs or execute returned actions. API credentials remain in server configuration.\n\n`jev_guide` and guide resources use packaged local content without inference. Tool discovery and guidance require no API key; inference and model listing require one. Use the sources topic for official references when current Jev capability information is needed.\n";
 
 // skills/jev-mcp/references/sources.md
 var sources_default = `# Official sources and adaptation
@@ -23267,8 +23216,7 @@ try {
       fetch: providerFetch(undefined, {
         cloudflareGatewayId: process.env.CLOUDFLARE_AI_GATEWAY_ID
       }),
-      timeout: 30000,
-      retry: { maxRetries: 0 }
+      timeout: 30000
     });
   }, schedulerOptions(process.env));
   for (const signal of ["SIGINT", "SIGTERM"]) {
