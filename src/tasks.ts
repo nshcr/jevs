@@ -1,7 +1,6 @@
 import { z } from "zod";
-import type { Questions, SystemOneResult } from "@typesafe-ai/sdk";
 
-import { entry, safeJson } from "./contracts.ts";
+import { choiceValue, entry, safeJson } from "./contracts.ts";
 const id = z
   .string()
   .min(1)
@@ -13,27 +12,53 @@ const question = entry.describe(
 export const classification = z.strictObject({
   id,
   question,
-  options: safeJson(z.record(z.string().min(1), entry))
-    .refine(
-      (v) => Object.keys(v).length >= 2 && Object.keys(v).length <= 255,
-      "Provide 2 to 255 options",
-    )
-    .meta({ minProperties: 2, maxProperties: 255 })
-    .describe(
-      "Labels mapped to descriptions, structured rubrics, taxonomy subtrees, or null.",
-    ),
+  options: safeJson(
+    z.union([
+      z
+        .record(z.string().min(1), entry)
+        .refine(
+          (v) => Object.keys(v).length >= 1,
+          "Provide at least 1 option; the provider may impose stricter limits",
+        )
+        .meta({ minProperties: 1 }),
+      z
+        .array(
+          z.strictObject({ value: choiceValue, description: entry.optional() }),
+        )
+        .min(1)
+        .refine(
+          (v) =>
+            new Set(v.map((option) => JSON.stringify(option.value))).size ===
+            v.length,
+          "Choice values must be unique with their original types",
+        ),
+    ]),
+  ).describe(
+    "Labels mapped to descriptions, or an array of {value,description?}. Boolean values require typedChoices capability; true and string 'true' remain distinct. Descriptions accept text, JSON or null.",
+  ),
 });
-export const scoring = z.strictObject({
-  id,
-  question,
-  levels: z
-    .array(entry)
-    .min(2)
-    .max(10)
-    .describe(
-      "Ordered levels, each text, JSON object/array, or null. Score is a zero-based expected position, possibly fractional.",
-    ),
-});
+export const scoring = z
+  .strictObject({
+    id,
+    question,
+    levels: z
+      .array(entry)
+      .min(1)
+      .describe(
+        "Ordered levels, each text, JSON object/array, or null. Score is a zero-based expected position, possibly fractional.",
+      ),
+    levelLabels: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Native labels for ordered levels; requires labeledScores capability.",
+      ),
+  })
+  .refine(
+    (v) =>
+      v.levelLabels === undefined || v.levelLabels.length === v.levels.length,
+    "Provide one label per score level",
+  );
 export const checking = z.strictObject({
   id,
   question,
@@ -44,24 +69,112 @@ export const checking = z.strictObject({
     .optional()
     .describe("Optional structured definition of a negative answer."),
 });
-const common = {
-  content: entry.describe(
-    "Shared text or JSON context to evaluate; transmitted to TypeSafe AI.",
-  ),
-  model: z.string().trim().min(1).optional(),
+export const imageInput = z
+  .union([
+    z.string().min(1),
+    z.strictObject({
+      content_type: z.enum([
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+      ]),
+      base64: z.string().min(1),
+      detail: z.enum(["low", "high", "auto", "original"]).nullable().optional(),
+    }),
+  ])
+  .describe(
+    "Embedded data URL or {content_type,base64}; only on image-capable providers. Remote image URLs are unsupported.",
+  );
+export const messageInput = z
+  .strictObject({
+    parts: z
+      .array(
+        z.discriminatedUnion("type", [
+          z.strictObject({ type: z.literal("text"), text: z.string() }),
+          z.strictObject({ type: z.literal("image"), image: imageInput }),
+        ]),
+      )
+      .min(1),
+  })
+  .describe(
+    "One user message with ordered text/image parts; requires messages capability.",
+  );
+const evidence = {
+  images: z.array(imageInput).min(1).optional(),
+  content: entry
+    .optional()
+    .describe(
+      "Shared text or JSON context. Supply content or messages, exclusively.",
+    ),
+  messages: z.array(messageInput).min(1).optional(),
+  videos: z
+    .array(z.strictObject({ frames: z.array(imageInput).min(1) }))
+    .min(1)
+    .optional()
+    .describe(
+      "Video clips as ordered embedded frames; requires video input capability.",
+    ),
+  mediaOptions: safeJson(z.record(z.string(), z.json()))
+    .optional()
+    .describe(
+      "Native media processor options; requires mediaOptions capability.",
+    ),
 };
+const metadata = {
+  model: z.string().trim().min(1).optional(),
+  allowUnverifiedModel: z
+    .boolean()
+    .optional()
+    .describe(
+      "Explicitly attempt an unverified model using its declared protocol baseline; never bypasses unsupported capabilities.",
+    ),
+  safetyIdentifier: z
+    .string()
+    .max(128)
+    .nullable()
+    .optional()
+    .describe(
+      "Provider safety identifier; requires safetyIdentifier capability.",
+    ),
+};
+const common = { ...evidence, ...metadata };
+export function evidenceIssue(v: {
+  content?: unknown;
+  messages?: unknown;
+  images?: unknown;
+  videos?: unknown;
+}): string | undefined {
+  if ((v.content !== undefined) === (v.messages !== undefined))
+    return "Supply exactly one of content or messages";
+  if (
+    v.messages !== undefined &&
+    (v.images !== undefined || v.videos !== undefined)
+  )
+    return "Put images inside message parts; messages cannot be combined with legacy images or videos";
+}
+function validateEvidence(
+  v: Parameters<typeof evidenceIssue>[0],
+  ctx: z.RefinementCtx,
+) {
+  const message = evidenceIssue(v);
+  if (message) ctx.addIssue({ code: "custom", message });
+}
 function uniqueIds(items: { id: string }[]) {
   return new Set(items.map((x) => x.id)).size === items.length;
 }
 export const classifySchema = z
   .strictObject({ ...common, items: z.array(classification).min(1) })
-  .refine((v) => uniqueIds(v.items), "Item IDs must be unique");
+  .refine((v) => uniqueIds(v.items), "Item IDs must be unique")
+  .superRefine(validateEvidence);
 export const scoreSchema = z
   .strictObject({ ...common, items: z.array(scoring).min(1) })
-  .refine((v) => uniqueIds(v.items), "Item IDs must be unique");
+  .refine((v) => uniqueIds(v.items), "Item IDs must be unique")
+  .superRefine(validateEvidence);
 export const checkSchema = z
   .strictObject({ ...common, items: z.array(checking).min(1) })
-  .refine((v) => uniqueIds(v.items), "Item IDs must be unique");
+  .refine((v) => uniqueIds(v.items), "Item IDs must be unique")
+  .superRefine(validateEvidence);
 const groups = {
   classifications: z.array(classification).optional(),
   scores: z.array(scoring).optional(),
@@ -93,86 +206,17 @@ function validateGroups(
 }
 export const structureSchema = z
   .strictObject({ ...common, ...groups })
-  .superRefine(validateGroups);
+  .superRefine(validateGroups)
+  .superRefine(validateEvidence);
 export const batchSchema = z
   .strictObject({
-    model: common.model,
+    ...metadata,
     ...groups,
     records: z
-      .array(z.strictObject({ id, content: entry }))
+      .array(z.strictObject({ id, ...evidence }).superRefine(validateEvidence))
       .min(1)
       .max(32)
       .refine(uniqueIds, "Record IDs must be unique"),
   })
   .superRefine(validateGroups);
 export type Assessment = z.infer<typeof structureSchema>;
-export function toRequest(input: Assessment) {
-  const entries: [string, Questions[string]][] = [];
-  for (const item of input.classifications ?? [])
-    entries.push([
-      item.id,
-      { type: "choice", instructions: item.question, criteria: item.options },
-    ]);
-  for (const item of input.scores ?? [])
-    entries.push([
-      item.id,
-      {
-        type: "score",
-        instructions: item.question,
-        criteria: [item.levels[0]!, item.levels[1]!, ...item.levels.slice(2)],
-      },
-    ]);
-  for (const item of input.checks ?? [])
-    entries.push([
-      item.id,
-      {
-        type: "noul",
-        instructions: item.question,
-        ...(item.yes !== undefined || item.no !== undefined
-          ? {
-              criteria: {
-                ...(item.yes !== undefined ? { true: item.yes } : {}),
-                ...(item.no !== undefined ? { false: item.no } : {}),
-              },
-            }
-          : {}),
-      },
-    ]);
-  return {
-    state: input.content,
-    questions: Object.fromEntries(entries),
-    ...(input.model ? { model: input.model } : {}),
-  };
-}
-export function toResult(response: SystemOneResult<Questions>) {
-  return {
-    results: Object.entries(response.answers).map(([id, answer]) => {
-      switch (answer.type) {
-        case "choice":
-          return {
-            id,
-            kind: "classification",
-            value: answer.choice,
-            confidence: answer.confidence,
-            probabilities: answer.probabilities,
-          };
-        case "score":
-          return {
-            id,
-            kind: "score",
-            value: answer.score,
-            confidence: answer.confidence,
-            probabilities: answer.probabilities,
-            levels: answer.legend,
-          };
-        case "noul":
-          return { id, kind: "check", probability: answer.noul };
-      }
-    }),
-    model: response.model,
-    usage: {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-    },
-  };
-}

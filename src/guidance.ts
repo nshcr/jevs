@@ -22,10 +22,10 @@ const topicSchema = z.enum([
 ]);
 export function registerGuidance(server: McpServer) {
   server.registerTool(
-    "jev_guide",
+    "decision_guide",
     {
       description:
-        "Read local Jev usage guidance without inference or token cost. Start with overview; examples contains ready-to-call tool payloads, patterns covers ranking/extraction/composition, limits explains boundaries. Use when unfamiliar with Jev.",
+        "Read local decision-model usage guidance without inference or token cost. Start with overview; examples contains ready-to-call tool payloads, patterns covers ranking/extraction/composition, limits explains boundaries. Use when unfamiliar with jevs.",
       inputSchema: z.strictObject({ topic: topicSchema.default("overview") }),
       outputSchema: z.object({ topic: topicSchema, text: z.string() }),
       annotations: {
@@ -45,10 +45,10 @@ export function registerGuidance(server: McpServer) {
   );
   for (const topic of topicSchema.options) {
     server.registerResource(
-      `jev-guide-${topic}`,
+      `decision-guide-${topic}`,
       `jevs://guide/${topic}`,
       {
-        description: `Jev MCP caller guidance: ${topic}`,
+        description: `Decision MCP caller guidance: ${topic}`,
         mimeType: topic === "examples" ? "application/json" : "text/markdown",
       },
       async (uri) => ({

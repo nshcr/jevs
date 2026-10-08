@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { TypeSafeClient, APIUserAbortError } from "@typesafe-ai/sdk";
+import { createProvider } from "../src/provider.ts";
+import { RequestCancelledError } from "../src/failures.ts";
 import { createServer } from "../src/server.ts";
 import { batchSchema } from "../src/tasks.ts";
 import { batchOutputSchema, runBatch } from "../src/batch.ts";
@@ -18,12 +19,12 @@ test("MCP multi-record batch preserves correlation, isolates failures and limits
   let active = 0,
     peak = 0;
   const seen: number[] = [];
-  const sdk = new TypeSafeClient({
+  const sdk = createProvider({
+    kind: "typesafe",
     apiKey: "fixture",
     baseURL: "https://api.typesafe.ai",
     defaultModel: "fixture",
-    logLevel: "off",
-    retry: { maxRetries: 0 },
+    allowUnverifiedModels: true,
     fetch: async (_, init) => {
       const request = JSON.parse(init!.body as string);
       const i = request.state.index;
@@ -114,7 +115,7 @@ test("batch cancellation aborts active requests and leaves remaining records uns
       return new Promise((_, reject) =>
         signal.addEventListener(
           "abort",
-          () => reject(new APIUserAbortError()),
+          () => reject(new RequestCancelledError()),
           { once: true },
         ),
       );
@@ -149,6 +150,7 @@ test("a large batch yields slots to a waiting realtime request", async () => {
         calls++;
         if (calls <= 2) await first.promise;
         return {
+          provider: "fixture",
           results: [{ id: "valid", kind: "check" as const, probability: 1 }],
           model: "fixture",
           usage: { inputTokens: 1, outputTokens: 1 },

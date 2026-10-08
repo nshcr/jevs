@@ -1,0 +1,2 @@
+# Clef bridge verification uses real image/frame decoding, without trained weights.
+Pillow==12.3.0

@@ -1,229 +1,182 @@
-import { test, expect } from "bun:test";
-import { TypeSafeClient } from "@typesafe-ai/sdk";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createServer } from "../src/server.ts";
-import {
-  structureSchema,
-  classifySchema,
-  scoreSchema,
-  toRequest,
-} from "../src/tasks.ts";
-import { validateResponse } from "../src/contracts.ts";
-
-const input = { content: null, checks: [{ id: "q", question: null }] };
-const base = () => ({
-  model: "fixture",
+import { expect, test } from "bun:test";
+import { createProvider } from "../src/provider.ts";
+import { ResponseContractError } from "../src/failures.ts";
+const input = { content: "ready", checks: [{ id: "q", question: "Ready?" }] };
+const base = {
+  model: "actual",
   answers: { q: { type: "noul", noul: 0.8 } },
   usage: { input_tokens: 1, output_tokens: 2 },
+};
+async function evaluate(body: unknown, request = input) {
+  return createProvider({
+    kind: "openrouter",
+    apiKey: "fixture",
+    fetch: async () => Response.json(body),
+  }).evaluate(request, new AbortController().signal);
+}
+test("malformed answers, exact IDs, metadata and prototype keys fail atomically", async () => {
+  for (const body of [
+    { ...base, answers: {} },
+    { ...base, answers: { ...base.answers, extra: base.answers.q } },
+    { ...base, answers: { q: { type: "score", score: 1 } } },
+    { ...base, answers: { q: { type: "noul" } } },
+    { ...base, answers: { q: { type: "noul", noul: "yes" } } },
+    { ...base, model: 1 },
+    { ...base, usage: { input_tokens: -1, output_tokens: 2 } },
+    { ...base, usage: undefined },
+    JSON.parse(
+      '{"model":"actual","answers":{"q":{"type":"noul","noul":0.5,"__proto__":{}}},"usage":{"input_tokens":1,"output_tokens":2}}',
+    ),
+    { success: false, result: base },
+  ])
+    await expect(evaluate(body)).rejects.toBeInstanceOf(ResponseContractError);
 });
-const malformed: [string, unknown][] = [
-  ["missing answer", { ...base(), answers: {} }],
-  [
-    "extra ID",
-    {
-      ...base(),
-      answers: { ...base().answers, other: { type: "noul", noul: 0.5 } },
-    },
-  ],
-  [
-    "wrong type",
-    {
-      ...base(),
-      answers: {
-        q: {
-          type: "choice",
-          choice: "a",
-          confidence: 1,
-          probabilities: { a: 1 },
+test("optional choice and score metrics stay absent; provider numeric values are preserved", async () => {
+  const request = {
+    content: "ready",
+    classifications: [
+      { id: "c", question: "Label?", options: { a: null, b: null } },
+    ],
+    scores: [{ id: "s", question: "Score?", levels: ["low", "high"] }],
+  };
+  const provider = createProvider({
+    kind: "openrouter",
+    apiKey: "fixture",
+    fetch: async () =>
+      Response.json({
+        model: "cloudflare/clef",
+        answers: {
+          c: { type: "choice", choice: "a" },
+          s: {
+            type: "score",
+            score: 17.01,
+            confidence: 2,
+            probabilities: { "0": 0.9, "1": 0.9 },
+            legend: { "0": "low", "1": "provider description" },
+          },
         },
-      },
+        usage: base.usage,
+      }),
+  });
+  expect(
+    (await provider.evaluate(request, new AbortController().signal)).results,
+  ).toEqual([
+    { id: "c", kind: "classification", value: "a" },
+    {
+      id: "s",
+      kind: "score",
+      value: 17.01,
+      confidence: 2,
+      probabilities: { "0": 0.9, "1": 0.9 },
+      levels: { "0": "low", "1": "provider description" },
     },
-  ],
-  ...["yes", null, undefined].map(
-    (value) =>
-      [
-        "invalid probability " + String(value),
-        { ...base(), answers: { q: { type: "noul", noul: value } } },
-      ] as [string, unknown],
-  ),
-  ["unknown type", { ...base(), answers: { q: { type: "unknown" } } }],
-  [
-    "bad metadata",
-    { ...base(), model: 5, usage: { input_tokens: -1, output_tokens: "x" } },
-  ],
-];
-test("MCP rejects malformed successful HTTP responses and advertises output schemas", async () => {
-  let body: unknown = base();
-  const server = createServer(
-    new TypeSafeClient({
-      baseURL: "https://api.typesafe.ai",
-      defaultModel: "fixture",
-      apiKey: "mock",
-      logLevel: "off",
-      fetch: async () => Response.json(body),
-    }),
-  );
-  const client = new Client({ name: "contracts", version: "1" });
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  await server.connect(a);
-  await client.connect(b);
-  try {
-    for (const tool of (await client.listTools()).tools)
-      expect(tool.outputSchema).toBeDefined();
-    for (const [, fixture] of malformed) {
-      body = fixture;
-      const result = await client.callTool({
-        name: "assess_structure",
-        arguments: input,
-      });
-      expect(result.isError).toBe(true);
-      expect(result.structuredContent).toBeUndefined();
-      expect(JSON.stringify(result)).toContain("no results were accepted");
-    }
-  } finally {
-    await client.close();
-    await server.close();
+  ]);
+  for (const answer of [
+    { type: "choice", choice: "outside" },
+    { type: "choice", choice: "a", probabilities: { outside: 1 } },
+  ]) {
+    const bad = createProvider({
+      kind: "system-one",
+      allowUnverifiedModels: true,
+      baseURL: "http://localhost:8000",
+      defaultModel: "custom",
+      fetch: async () =>
+        Response.json({ model: "custom", answers: { c: answer } }),
+    });
+    await expect(
+      bad.evaluate(
+        { content: "ready", classifications: request.classifications },
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(ResponseContractError);
   }
 });
-
-test("Choice and Score preserve supplier values while checking response shape", () => {
-  const choice = {
-    q: { type: "choice" as const, criteria: { a: null, b: null } },
-  };
-  const score = {
-    q: {
-      type: "score" as const,
-      criteria: [null, { summary: "high" }] as [null, { summary: string }],
-    },
-  };
-  const validChoice = {
-    type: "choice" as const,
-    choice: "a",
-    confidence: 0.5,
-    probabilities: { a: 0.7, b: 0.3 },
-  };
-  const validScore = {
-    type: "score" as const,
-    score: 0.7,
-    confidence: 0.5,
-    probabilities: { "0": 0.3, "1": 0.7 },
-    legend: { "0": null, "1": { summary: "high" } },
-  };
-  for (const [q, answer] of [
-    [choice, validChoice],
-    [score, validScore],
-  ] as const)
-    expect(() =>
-      validateResponse({ ...base(), answers: { q: answer } }, q),
-    ).not.toThrow();
-  const roundedChoice = {
-    type: "choice",
-    choice: "a",
-    confidence: 0.34,
-    probabilities: { a: 0.33, b: 0.33, c: 0.33 },
-  };
-  expect(() =>
-    validateResponse(
-      { ...base(), answers: { q: roundedChoice } },
-      { q: { type: "choice", criteria: { a: null, b: null, c: null } } },
+test("Clef native metrics required; generic compatible endpoint accepts absent usage", async () => {
+  const clef = createProvider({
+    kind: "cloudflare-workers",
+    accountId: "fixture",
+    apiKey: "fixture",
+    fetch: async () =>
+      Response.json({
+        model: "clef",
+        answers: { q: { type: "choice", choice: "a" } },
+        usage: base.usage,
+      }),
+  });
+  await expect(
+    clef.evaluate(
+      {
+        content: "ready",
+        classifications: [
+          { id: "q", question: "Label?", options: { a: null, b: null } },
+        ],
+      },
+      new AbortController().signal,
     ),
-  ).not.toThrow();
-  const badChoices = [
-    { ...validChoice, choice: "c" },
-    { ...validChoice, confidence: 2 },
-    { ...validChoice, choice: "b" },
-    { ...validChoice, probabilities: { a: 0.9, b: 0.9 } },
-    { ...validChoice, probabilities: { a: 1 } },
-  ];
-  for (const a of badChoices)
-    expect(validateResponse({ ...base(), answers: { q: a } }, choice)).toEqual({
-      ...base(),
-      answers: { q: a },
-    });
-  for (const a of [
-    { ...validScore, score: 99 },
-    { ...validScore, score: 0.2 },
-    { ...validScore, legend: { "0": null, "1": "wrong" } },
-  ])
-    expect(validateResponse({ ...base(), answers: { q: a } }, score)).toEqual({
-      ...base(),
-      answers: { q: a },
-    });
-});
-
-test("API limits and dangerous JSON keys are rejected before transformation", () => {
-  const options = (n: number) =>
-    Object.fromEntries(Array.from({ length: n }, (_, i) => [`c${i}`, null]));
-  for (const [n, accepted] of [
-    [2, true],
-    [255, true],
-    [256, false],
-  ] as const)
-    expect(
-      classifySchema.safeParse({
-        content: null,
-        items: [{ id: "q", question: null, options: options(n) }],
-      }).success,
-    ).toBe(accepted);
-  for (const [n, accepted] of [
-    [2, true],
-    [10, true],
-    [11, false],
-  ] as const)
-    expect(
-      scoreSchema.safeParse({
-        content: null,
-        items: [{ id: "q", question: null, levels: Array(n).fill(null) }],
-      }).success,
-    ).toBe(accepted);
-  const bad = JSON.parse('{"nested":[{"__proto__":{"secret":1}}]}');
-  for (const data of [
-    { ...input, content: bad },
-    { ...input, checks: [{ id: "q", question: bad }] },
-    { ...input, checks: [{ id: "q", question: null, yes: bad }] },
-    { ...input, checks: [{ id: "__proto__", question: null }] },
-  ])
-    expect(structureSchema.safeParse(data).success).toBe(false);
+  ).rejects.toBeInstanceOf(ResponseContractError);
+  const generic = createProvider({
+    kind: "system-one",
+    allowUnverifiedModels: true,
+    baseURL: "http://localhost:8000",
+    defaultModel: "custom",
+    fetch: async () =>
+      Response.json({ model: "custom", answers: base.answers }),
+  });
   expect(
-    classifySchema.safeParse({
-      content: null,
-      items: [
-        {
-          id: "q",
-          question: null,
-          options: JSON.parse('{"a":null,"__proto__":null}'),
-        },
-      ],
-    }).success,
-  ).toBe(false);
+    (await generic.evaluate(input, new AbortController().signal)).usage,
+  ).toBeUndefined();
 });
 
-test("structured multi-question requests retain nested data and correlate answers", () => {
-  const content = {
-    中文: [true, false, null, 30, "🙂", { constructor: "valid data" }],
-  };
-  const checks = Array.from({ length: 30 }, (_, i) => ({
-    id: `字段.${i}`,
-    question: content,
-    yes: null,
-    no: [content],
-  }));
-  const req = toRequest(structureSchema.parse({ content, checks }));
-  expect(req.state).toEqual(content);
-  expect(Object.values(req.questions)).toEqual(
-    checks.map(() => ({
-      type: "noul",
-      instructions: content,
-      criteria: { true: null, false: [content] },
-    })),
-  );
-  const answers = Object.fromEntries(
-    checks.map((c, i) => [
-      c.id,
-      { type: "noul" as const, noul: i / checks.length },
-    ]),
-  );
-  const response = { ...base(), answers };
-  expect(validateResponse(response, req.questions).answers).toEqual(answers);
+test("OpenRouter retains response identity upstream provider and optional cost", async () => {
+  const provider = createProvider({
+    kind: "openrouter",
+    apiKey: "fixture",
+    fetch: async () =>
+      Response.json({
+        ...base,
+        id: "decision-fixture",
+        provider: "Cloudflare",
+        usage: { ...base.usage, cost: 0.000001 },
+      }),
+  });
+  expect(await provider.evaluate(input, new AbortController().signal)).toEqual({
+    provider: "openrouter",
+    model: "actual",
+    responseId: "decision-fixture",
+    upstreamProvider: "Cloudflare",
+    results: [{ id: "q", kind: "check", probability: 0.8 }],
+    usage: { inputTokens: 1, outputTokens: 2, cost: 0.000001 },
+  });
+});
+
+test("native System One provider contracts require their declared choice metrics", async () => {
+  for (const kind of [
+    "typesafe",
+    "vercel",
+    "zen",
+    "cloudflare-gateway",
+  ] as const) {
+    const provider = createProvider({
+      kind,
+      accountId: "fixture",
+      apiKey: "fixture",
+      fetch: async () =>
+        Response.json({
+          model: "actual",
+          answers: { c: { type: "choice", choice: "a" } },
+          usage: base.usage,
+        }),
+    });
+    await expect(
+      provider.evaluate(
+        {
+          content: "ready",
+          classifications: [
+            { id: "c", question: "Label?", options: { a: null, b: null } },
+          ],
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(ResponseContractError);
+  }
 });

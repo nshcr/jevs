@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { APIUserAbortError } from "@typesafe-ai/sdk";
+import { RequestCancelledError } from "../src/failures.ts";
 import {
   RequestScheduler,
   AdmissionError,
@@ -33,7 +33,7 @@ test("scheduler caps active work, bounds queue, removes cancellation and recover
   );
   expect(calls).toBe(2);
   abort.abort();
-  expect(await queued).toBeInstanceOf(APIUserAbortError);
+  expect(await queued).toBeInstanceOf(RequestCancelledError);
   const replacement = scheduler.run(work, signal());
   gate.resolve();
   await Promise.all([first, second, replacement]);

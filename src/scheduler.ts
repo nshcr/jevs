@@ -1,4 +1,4 @@
-import { APIUserAbortError } from "@typesafe-ai/sdk";
+import { RequestCancelledError } from "./failures.ts";
 
 export type SchedulerOptions = {
   concurrency: number;
@@ -57,12 +57,12 @@ export class RequestScheduler {
     bounded(this.options.queueTimeoutMs, 1, 60000, "queueTimeoutMs");
   }
   async run<T>(task: () => Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) throw new APIUserAbortError();
+    if (signal.aborted) throw new RequestCancelledError();
     let deadline: number | undefined;
     if (this.active < this.options.concurrency) this.active++;
     else deadline = await this.wait(signal);
     try {
-      if (signal.aborted) throw new APIUserAbortError();
+      if (signal.aborted) throw new RequestCancelledError();
       // A resolved admission promise can itself wait behind other microtasks.
       if (deadline !== undefined && performance.now() >= deadline)
         throw new AdmissionError("timeout");
@@ -90,7 +90,7 @@ export class RequestScheduler {
         cleanup();
         reject(error);
       };
-      const abort = () => fail(new APIUserAbortError());
+      const abort = () => fail(new RequestCancelledError());
       const entry = {
         start: () => {
           cleanup();

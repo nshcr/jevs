@@ -1,727 +1,1022 @@
 import { expect, test } from "bun:test";
-import { TypeSafeClient, APIError } from "@typesafe-ai/sdk";
+import { createProvider } from "../src/provider.ts";
 import {
-  providerFetch,
-  isVercel,
-  validateProviderRequest,
   ProviderInputError,
+  ProviderHttpError,
+  RequestCancelledError,
+  RequestTimeoutError,
   ProviderConfigurationError,
-} from "../src/provider.ts";
-import { toolError } from "../src/errors.ts";
-const baseURL = "https://opencode.ai/zen";
-
-test("Zen catalog adapts through official SDK without inventing metadata", async () => {
-  const abort = new AbortController();
-  let calls = 0;
-  const sdk = new TypeSafeClient({
-    apiKey: "fixture",
-    baseURL,
-    logLevel: "off",
-    retry: { maxRetries: 0 },
-    fetch: providerFetch(async (url, init) => {
-      calls++;
-      expect(url).toBe(`${baseURL}/v1/models`);
-      expect(new Headers(init?.headers).get("authorization")).toBe(
-        "Bearer fixture",
-      );
-      expect(init?.signal).toBeDefined();
-      return Response.json({
-        object: "list",
-        data: [
-          { id: "other-model" },
-          { id: "jev-1.13-free", created: 123 },
-          { id: "jev-1.13" },
-        ],
-      });
-    }),
-  });
-  expect(await sdk.models.list({ signal: abort.signal })).toEqual([
-    { name: "jev-1.13-free", description: "", release_date: "" },
-    { name: "jev-1.13", description: "", release_date: "" },
-  ]);
-  expect(calls).toBe(1);
-});
-
-test("provider adapter preserves non-Zen, inference, malformed catalog and HTTP errors", async () => {
-  for (const [url, method, status, body] of [
-    ["https://api.typesafe.ai/v1/models", "GET", 200, { models: [] }],
-    [`${baseURL}/v1/systemone`, "POST", 200, { answers: {} }],
-    [`${baseURL}/v1/models`, "GET", 200, { object: "list", data: [{ id: 7 }] }],
-    [`${baseURL}/v1/models`, "GET", 429, { error: "fixture" }],
-  ] as const) {
-    const original = Response.json(body, { status });
-    const adapted = await providerFetch(async () => original)(url, { method });
-    expect(adapted).toBe(original);
-    expect(await adapted.json()).toEqual(body);
-  }
-  const sdk = new TypeSafeClient({
-    apiKey: "fixture",
-    baseURL,
-    logLevel: "off",
-    retry: { maxRetries: 0 },
-    fetch: providerFetch(async () =>
-      Response.json(
-        { error: { code: "rate_limit_error", message: "SECRET_PAYLOAD" } },
-        { status: 429, headers: { "retry-after": "2" } },
-      ),
-    ),
-  });
+} from "../src/failures.ts";
+import type { DecisionAdapter, ProviderKind } from "../src/decision.ts";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const input = {
+  content: { evidence: [null, "ready"] },
+  checks: [{ id: "q", question: "Ready?" }],
+};
+const response = {
+  model: "actual-version",
+  answers: { q: { type: "noul", noul: 0.8 } },
+  usage: { input_tokens: 10, output_tokens: 2 },
+};
+const signal = () => new AbortController().signal;
+test("Clef Python factory selects the local runtime before HTTP configuration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jevs-factory-clef-"));
   try {
-    await sdk.models.list();
-    throw Error("Expected rejection");
-  } catch (error) {
-    expect(error).toBeInstanceOf(APIError);
-    expect(JSON.parse(toolError(error).content[0]!.text).error).toMatchObject({
-      code: "RATE_LIMITED",
-      upstreamCode: "rate_limit_error",
-      retryAfterMs: 2000,
-    });
-    expect(JSON.stringify(toolError(error))).not.toContain("SECRET_PAYLOAD");
-  }
-});
-
-test("Zen rejects observed unsupported null inputs locally but preserves structured and native inputs", () => {
-  const invalid = [
-    {
-      state: null,
-      questions: { q: { type: "noul", instructions: "Question" } },
-    },
-    {
-      state: "text",
-      questions: {
-        q: {
-          type: "score",
-          instructions: "Question",
-          criteria: [null, "high"],
-        },
-      },
-    },
-    {
-      state: "text",
-      questions: {
-        q: {
-          type: "noul",
-          instructions: null,
-          criteria: { true: null, false: null },
-        },
-      },
-    },
-  ] as const;
-  for (const request of invalid) {
-    // Mutable JSON payload matches the SDK's mutable arrays.
-    const payload = JSON.parse(JSON.stringify(request));
-    expect(() => validateProviderRequest(baseURL, payload)).toThrow(
-      ProviderInputError,
+    writeFileSync(
+      join(dir, "joint_schema_model.py"),
+      "# construction fixture; never imported\n",
     );
-    expect(() =>
-      validateProviderRequest("https://api.typesafe.ai", payload),
-    ).not.toThrow();
+    let calls = 0;
+    const provider = createProvider({
+      kind: "clef-python",
+      pythonModelDir: dir,
+      pythonExecutable: "/nonexistent/python",
+      baseURL: "not-an-http-url",
+      apiKey: "fixture\nnot-http",
+      fetch: async () => {
+        calls++;
+        throw Error("No HTTP expected");
+      },
+    });
+    expect(provider.describe()).toMatchObject({
+      provider: "clef-python",
+      protocol: "clef-python",
+      capabilities: { inputs: ["text", "json", "image", "video"] },
+    });
+    expect((await provider.listModels(signal())).source).toBe("configured");
+    expect(calls).toBe(0);
+    await provider.close?.();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  expect(() =>
-    validateProviderRequest(baseURL, {
-      state: { missing: null },
-      questions: {
-        choice: {
-          type: "choice",
-          instructions: null,
-          criteria: { yes: null, no: null },
-        },
-        score: {
-          type: "score",
-          instructions: ["Quality"],
-          criteria: [{ value: null }, ["good"]],
-        },
-        check: {
-          type: "noul",
-          instructions: "Is evidence sufficient?",
-          criteria: { true: null, false: null },
-        },
-      },
-    }),
-  ).not.toThrow();
 });
-
-test("score validation preserves provider values despite range or distribution differences", async () => {
-  const { validateResponse } = await import("../src/contracts.ts");
-  const levels = [
-    "Terrible",
-    "Poor",
-    "Below average",
-    "Somewhat weak",
-    "Average",
-    "Somewhat good",
-    "Good",
-    "Very good",
-    "Excellent",
-    "Outstanding",
-  ];
-  const questions = {
-    quality: {
-      type: "score" as const,
-      instructions: "Quality",
-      criteria: levels as [string, string, ...string[]],
-    },
-  };
-  const response = {
-    model: "jev-1.13-free",
-    answers: {
-      quality: {
-        type: "score" as const,
-        score: 3.74,
-        confidence: 0.7,
-        legend: Object.fromEntries(levels.map((v, i) => [String(i), v])),
-        probabilities: {
-          "0": 0,
-          "1": 0,
-          "2": 0.01,
-          "3": 0.46,
-          "4": 0.32,
-          "5": 0.21,
-          "6": 0,
-          "7": 0,
-          "8": 0,
-          "9": 0,
-        },
+test("unknown model admission is explicit, performs no HTTP by default and cannot bypass unsupported profiles", async () => {
+  for (const kind of [
+    "typesafe",
+    "zen",
+    "vercel",
+    "cloudflare-gateway",
+    "openrouter",
+    "system-one",
+    "custom",
+  ] as const) {
+    let calls = 0;
+    const options = {
+      kind,
+      apiKey: "fixture",
+      accountId: "fixture",
+      ...(kind === "system-one" || kind === "custom"
+        ? {
+            baseURL: "http://localhost:8787",
+            defaultModel: "local-fixture",
+            ...(kind === "custom" ? { protocol: "system-one" } : {}),
+          }
+        : {}),
+      fetch: async () => {
+        calls++;
+        return Response.json(response);
+      },
+    };
+    const provider = createProvider(options);
+    const model =
+      kind === "openrouter"
+        ? "typesafe/jev-999.1"
+        : kind === "system-one" || kind === "custom"
+          ? "local-fixture"
+          : "jev-999.1";
+    expect(provider.describe(model)).toMatchObject({
+      availability: "unverified",
+      unverifiedModelsAllowed: false,
+      toolSupport: { check: "unverified" },
+    });
+    expect(provider.describe(model).reason).toContain("not verified");
+    await expect(
+      provider.evaluate({ ...input, model }, signal()),
+    ).rejects.toBeInstanceOf(ProviderInputError);
+    expect(calls).toBe(0);
+    await provider.evaluate(
+      { ...input, model, allowUnverifiedModel: true },
+      signal(),
+    );
+    expect(calls).toBe(1);
+    const hostAllowed = createProvider({
+      ...options,
+      allowUnverifiedModels: true,
+    });
+    expect(hostAllowed.describe(model).unverifiedModelsAllowed).toBe(true);
+    await hostAllowed.evaluate({ ...input, model }, signal());
+    expect(calls).toBe(2);
+  }
+  let calls = 0;
+  const blocked = createProvider(
+    {
+      kind: "system-one",
+      baseURL: "http://localhost:8787",
+      defaultModel: "blocked",
+      allowUnverifiedModels: true,
+      fetch: async () => {
+        calls++;
+        return Response.json(response);
       },
     },
-    usage: { input_tokens: 367, output_tokens: 17 },
-  };
-  expect(validateResponse(response, questions)).toEqual(response);
-  const mixedPrecisionResponse = {
-    ...response,
-    answers: {
-      quality: { ...response.answers.quality, score: 3.740001 },
-    },
-  };
-  expect(validateResponse(mixedPrecisionResponse, questions)).toEqual(
-    mixedPrecisionResponse,
-  );
-  const officialLevels = [
-    { score: 0, label: "very poor", meaning: "Strongly negative overall" },
-    { score: 1, label: "poor", meaning: "Mostly negative" },
     {
-      score: 2,
-      label: "mixed or average",
-      meaning: "Positive and negative evidence",
-    },
-    { score: 3, label: "good", meaning: "Mostly positive" },
-    { score: 4, label: "excellent", meaning: "Strongly positive" },
-  ];
-  const officialQuestions = {
-    experience: {
-      type: "score" as const,
-      instructions: "Rate the overall experience.",
-      criteria: officialLevels as [
-        (typeof officialLevels)[number],
-        (typeof officialLevels)[number],
-        ...(typeof officialLevels)[number][],
+      models: [
+        {
+          provider: "system-one",
+          model: "blocked",
+          protocol: "system-one",
+          availability: "unsupported",
+        },
       ],
     },
-  };
-  const officialResponse = {
-    model: "jev-1.13.0",
-    answers: {
-      experience: {
-        type: "score" as const,
-        score: 2.03,
-        confidence: 0.97,
-        legend: Object.fromEntries(
-          officialLevels.map((level, index) => [index, level]),
-        ),
-        probabilities: { "0": 0, "1": 0.01, "2": 0.96, "3": 0.03, "4": 0 },
-      },
-    },
-    usage: { input_tokens: 639, output_tokens: 17 },
-  };
-  expect(validateResponse(officialResponse, officialQuestions)).toEqual(
-    officialResponse,
   );
-  const outOfRangeScore = {
-    ...response,
-    answers: { quality: { ...response.answers.quality, score: 10.4 } },
-  };
-  expect(validateResponse(outOfRangeScore, questions)).toEqual(outOfRangeScore);
-  const inconsistentDistribution = {
-    ...response,
-    answers: {
-      quality: {
-        ...response.answers.quality,
-        probabilities: {
-          ...response.answers.quality.probabilities,
-          "3": 0.8,
-        },
-      },
-    },
-  };
-  expect(validateResponse(inconsistentDistribution, questions)).toEqual(
-    inconsistentDistribution,
-  );
+  await expect(
+    blocked.evaluate({ ...input, allowUnverifiedModel: true }, signal()),
+  ).rejects.toBeInstanceOf(ProviderInputError);
+  expect(blocked.describe().toolSupport?.check).toBe("unsupported");
+  expect(calls).toBe(0);
 });
-
-test("MCP reports Zen admission errors before issuing HTTP requests", async () => {
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import(
-    "@modelcontextprotocol/sdk/inMemory.js"
-  );
-  const { createServer } = await import("../src/server.ts");
+test("OpenAI exposes the documented protocol and capabilities without credentials but requires authentication to dispatch", async () => {
   let calls = 0;
-  const sdk = new TypeSafeClient({
-    apiKey: "fixture",
-    baseURL,
-    logLevel: "off",
+  const provider = createProvider({
+    kind: "openai",
     fetch: async () => {
       calls++;
-      throw Error("No request expected");
+      throw Error("No dispatch expected");
     },
   });
-  const server = createServer(sdk),
-    client = new Client({ name: "provider-test", version: "1" });
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  await server.connect(a);
-  await client.connect(b);
-  try {
-    for (const args of [
-      { content: null, checks: [{ id: "x", question: "Is valid?" }] },
-      {
-        content: "test",
-        scores: [{ id: "x", question: "Quality?", levels: [null, "high"] }],
+  expect(provider.describe()).toMatchObject({
+    provider: "openai",
+    protocol: "openai-decisions",
+    defaultModel: "gpt-6-luna",
+    model: "gpt-6-luna",
+    availability: "supported",
+    capabilitySource: "model",
+    capabilities: {
+      judgments: ["classification", "score", "check"],
+      inputs: ["text", "json", "image"],
+      mixedQuestions: true,
+      minOptions: 2,
+      maxOptions: 255,
+      maxImages: 128,
+      typedChoices: true,
+      refusals: true,
+    },
+  });
+  await expect(provider.evaluate(input, signal())).rejects.toBeInstanceOf(
+    ProviderConfigurationError,
+  );
+  await expect(provider.listModels(signal())).rejects.toBeInstanceOf(
+    ProviderConfigurationError,
+  );
+  expect(calls).toBe(0);
+});
+test("OpenAI dispatches one authenticated native Decisions request and resolves explicit models", async () => {
+  for (const selected of [undefined, "future-decider"]) {
+    let calls = 0;
+    const model = selected ?? "gpt-6-luna";
+    const provider = createProvider({
+      kind: "openai",
+      apiKey: "fixture-openai",
+      baseURL: "http://localhost:8787/api",
+      fetch: async (url, init) => {
+        calls++;
+        expect(String(url)).toBe("http://localhost:8787/api/v1/decisions");
+        expect(init?.method).toBe("POST");
+        expect(init?.redirect).toBe("error");
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer fixture-openai",
+        );
+        expect(JSON.parse(init!.body as string)).toEqual({
+          model,
+          input: "ready",
+          questions: [{ type: "predicate", name: "q", instructions: "Ready?" }],
+        });
+        return Response.json({
+          model,
+          answers: [{ type: "predicate", name: "q", probability: 0.95 }],
+          usage: {
+            input_tokens: 42,
+            input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+            output_tokens: 0,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 42,
+          },
+        });
       },
-      {
-        content: "test",
-        checks: [{ id: "x", question: null, yes: null, no: null }],
-      },
-    ]) {
-      const result = await client.callTool({
-        name: "assess_structure",
-        arguments: args,
-      });
-      expect(result.isError).toBe(true);
-      expect(result.structuredContent).toBeUndefined();
-      expect(JSON.stringify(result.content)).toContain("INVALID_REQUEST");
-      expect(JSON.stringify(result.content)).toContain("OpenCode Zen requires");
-    }
-    expect(calls).toBe(0);
-  } finally {
-    await client.close();
-    await server.close();
+    });
+    expect(
+      await provider.evaluate(
+        {
+          content: "ready",
+          checks: [{ id: "q", question: "Ready?" }],
+          ...(selected ? { model: selected, allowUnverifiedModel: true } : {}),
+        },
+        signal(),
+      ),
+    ).toMatchObject({
+      provider: "openai",
+      model,
+      protocol: "openai-decisions",
+      results: [{ id: "q", kind: "check", probability: 0.95 }],
+      usage: { inputTokens: 42, outputTokens: 0 },
+    });
+    expect(calls).toBe(1);
+    expect(provider.describe().model).toBe("gpt-6-luna");
   }
 });
 
-test("gateway inference keeps SDK auth, payload meaning and response contract", async () => {
-  const request = {
-    state: { evidence: ["ready", null] },
-    questions: { ready: { type: "noul" as const, instructions: "Ready?" } },
-  };
-  const answer = {
-    model: "jev-1.13.0",
-    answers: { ready: { type: "noul" as const, noul: 0.8 } },
-    usage: { input_tokens: 10, output_tokens: 2 },
-  };
-  for (const [baseURL, endpoint, model, wrapped] of [
+test("all explicit routes preserve authentication, payload and actual provenance", async () => {
+  const routes: [ProviderKind, string, string, boolean][] = [
+    ["typesafe", "https://api.typesafe.ai/v1/systemone", "jev-latest", false],
+    ["system-one", "http://localhost:8787/v1/systemone", "custom", false],
     [
-      "https://openrouter.ai/api",
+      "openrouter",
       "https://openrouter.ai/api/alpha/decisions",
       "typesafe/jev-1.13",
       false,
     ],
     [
-      "https://api.cloudflare.com/client/v4/accounts/fixture/ai",
+      "vercel",
+      "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
+      "typesafe-ai/jev",
+      false,
+    ],
+    ["zen", "https://opencode.ai/zen/v1/systemone", "jev-1.13", false],
+    [
+      "cloudflare-gateway",
       "https://api.cloudflare.com/client/v4/accounts/fixture/ai/run",
       "typesafe/jev",
       true,
     ],
     [
-      "https://ai-gateway.vercel.sh/typesafe",
-      "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
-      "typesafe-ai/jev",
+      "cloudflare-workers",
+      "https://api.cloudflare.com/client/v4/accounts/fixture/ai/run/@cf/cloudflare/clef",
+      "clef",
       false,
     ],
-  ] as const) {
-    let calls = 0;
-    const sdk = new TypeSafeClient({
-      apiKey: "fixture",
-      baseURL,
-      defaultModel: model,
-      logLevel: "off",
-      retry: { maxRetries: 0 },
-      fetch: providerFetch(async (url, init) => {
-        calls++;
-        expect(url).toBe(endpoint);
-        expect(new Headers(init?.headers).get("authorization")).toBe(
-          "Bearer fixture",
-        );
-        expect(init?.signal).toBeDefined();
-        expect(JSON.parse(init!.body as string)).toEqual(
-          wrapped ? { model, input: request } : { model, ...request },
-        );
-        return Response.json(
-          wrapped
-            ? { success: true, result: answer, errors: [], messages: [] }
-            : answer,
-        );
-      }),
-    });
-    expect(await sdk.systemOne(request)).toEqual(answer);
-    expect(calls).toBe(1);
-  }
-});
-
-test("gateway catalogs filter Jev and preserve unknown metadata", async () => {
-  for (const [baseURL, endpoint, id] of [
-    [
-      "https://openrouter.ai/api",
-      "https://openrouter.ai/api/v1/models",
-      "typesafe/jev-1.13",
-    ],
-    [
-      "https://api.cloudflare.com/client/v4/accounts/fixture/ai",
-      "https://api.cloudflare.com/client/v4/accounts/fixture/ai/models/search?search=typesafe%2Fjev&per_page=100&format=openrouter",
-      "typesafe/jev",
-    ],
-  ] as const) {
-    const sdk = new TypeSafeClient({
-      apiKey: "fixture",
-      baseURL,
-      logLevel: "off",
-      fetch: providerFetch(async (url) => {
-        expect(url).toBe(endpoint);
-        return Response.json({
-          data: [
-            { id, description: "Jev", created: 123 },
-            { id: "other/chat" },
-          ],
-        });
-      }),
-    });
-    expect(await sdk.models.list()).toEqual([
-      { name: id, description: "Jev", release_date: "" },
-    ]);
-  }
-});
-
-test("documented endpoint defaults and OpenRouter input limits reject before dispatch", async () => {
-  const { providerDefaultModel } = await import("../src/provider.ts");
-  expect(providerDefaultModel(undefined)).toBe("jev-latest");
-  expect(providerDefaultModel("https://opencode.ai/zen")).toBe("jev-1.13");
-  expect(providerDefaultModel("https://ai-gateway.vercel.sh/typesafe/")).toBe(
-    "typesafe-ai/jev",
-  );
-  expect(providerDefaultModel("https://openrouter.ai/api")).toBe(
-    "typesafe/jev-1.13",
-  );
-  expect(
-    providerDefaultModel(
-      "https://api.cloudflare.com/client/v4/accounts/fixture/ai",
-    ),
-  ).toBe("typesafe/jev");
-  for (const url of [
-    "https://ai-gateway.vercel.sh/v1",
-    "https://api.typesafe.ai/v1",
-    "https://opencode.ai/zen/v1",
-    "not-a-url",
-    "https://openrouter.ai/api?token=fixture",
-    "https://openrouter.ai/api/v1",
-    "https://api.cloudflare.com/client/v4/accounts/fixture/ai/run",
-  ])
-    expect(() => providerDefaultModel(url)).toThrow(ProviderConfigurationError);
-  const base = "https://openrouter.ai/api";
-  const good = {
-    state: { value: null },
-    questions: { q: { type: "noul" as const, instructions: "Ready?" } },
-  };
-  expect(() => validateProviderRequest(base, good)).not.toThrow();
-  for (const request of [
-    { ...good, state: null },
-    {
-      ...good,
-      questions: {
-        q: {
-          type: "choice",
-          instructions: null,
-          criteria: { a: null, b: null },
-        },
-      },
-    },
-    {
-      ...good,
-      questions: {
-        q: {
-          type: "score",
-          instructions: "Quality?",
-          criteria: [null, "good"],
-        },
-      },
-    },
-    {
-      ...good,
-      questions: {
-        q: { type: "noul", instructions: "Ready?", criteria: { true: "yes" } },
-      },
-    },
-  ])
-    expect(() =>
-      validateProviderRequest(base, JSON.parse(JSON.stringify(request))),
-    ).toThrow(ProviderInputError);
-});
-
-test("adapted gateways preserve errors, cancellation and malformed successful bodies", async () => {
-  const baseURL = "https://api.cloudflare.com/client/v4/accounts/fixture/ai";
-  const payload = {
-    state: "ready",
-    questions: { q: { type: "noul" as const, instructions: "Ready?" } },
-  };
-  for (const status of [401, 429, 503]) {
-    let calls = 0;
-    const sdk = new TypeSafeClient({
-      apiKey: "fixture",
-      baseURL,
-      logLevel: "off",
-      retry: { maxRetries: 0 },
-      fetch: providerFetch(async () => {
-        calls++;
-        return Response.json({ errors: [{ message: "private" }] }, { status });
-      }),
-    });
-    await expect(
-      sdk.systemOne(payload).then((value) => value),
-    ).rejects.toBeInstanceOf(APIError);
-    expect(calls).toBe(1);
-  }
-  for (const body of [
-    { success: false, result: {} },
-    { success: true },
-    { data: [{ id: 7 }] },
-  ]) {
-    const original = Response.json(body);
-    const response = await providerFetch(async () => original)(
-      `${baseURL}/v1/systemone`,
-      { method: "POST", body: JSON.stringify(payload) },
-    );
-    expect(response).toBe(original);
-  }
-  const abort = new AbortController();
-  let started!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  const sdk = new TypeSafeClient({
-    apiKey: "fixture",
-    baseURL,
-    logLevel: "off",
-    retry: { maxRetries: 0 },
-    fetch: providerFetch(async (_, init) => {
-      started();
-      return new Promise<Response>((_, reject) =>
-        init!.signal!.addEventListener(
-          "abort",
-          () => reject(new DOMException("Aborted", "AbortError")),
-          { once: true },
-        ),
-      );
-    }),
-  });
-  const outcome = sdk
-    .systemOne(payload, { signal: abort.signal })
-    .catch((e) => e);
-  await ready;
-  abort.abort();
-  expect(JSON.stringify(toolError(await outcome).content)).toContain(
-    "CANCELLED",
-  );
-});
-
-test("Vercel MCP accepts the observed rounded score and preserves provider values", async () => {
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import(
-    "@modelcontextprotocol/sdk/inMemory.js"
-  );
-  const { createServer } = await import("../src/server.ts");
-  const baseURL = "https://ai-gateway.vercel.sh/typesafe";
-  expect([
-    isVercel(baseURL),
-    isVercel(`${baseURL}/`),
-    isVercel("https://ai-gateway.vercel.sh/other"),
-    isVercel("https://example.com/typesafe"),
-  ]).toEqual([true, true, false, false]);
-  const levels = [
-    { value: 0, description: "Missing or contradictory key evidence" },
-    {
-      value: 1,
-      description: "Some evidence is present but a key field is incomplete",
-    },
-    { value: 2, description: "All expected fields are present and consistent" },
   ];
-  const response = {
-    model: "typesafe-ai/jev",
-    answers: {
-      quality: {
-        type: "score" as const,
-        score: 1.96,
-        confidence: 0.94,
-        legend: Object.fromEntries(
-          levels.map((value, index) => [index, value]),
-        ),
-        probabilities: { "0": 0.01, "1": 0.03, "2": 0.96 },
-      },
-    },
-    usage: { input_tokens: 392, output_tokens: 18 },
-  };
-  const sdk = new TypeSafeClient({
-    apiKey: "fixture",
-    baseURL,
-    defaultModel: "typesafe-ai/jev",
-    logLevel: "off",
-    retry: { maxRetries: 0 },
-    fetch: async () => Response.json(response),
-  });
-  const server = createServer(sdk);
-  const client = new Client({ name: "vercel-rounded-score", version: "1" });
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  await server.connect(a);
-  await client.connect(b);
-  try {
-    const result = await client.callTool({
-      name: "score",
-      arguments: {
-        content: { qualitySignals: { validFields: 3 } },
-        items: [
-          { id: "quality", question: "How complete is this record?", levels },
-        ],
+  for (const [kind, url, model, wrapped] of routes) {
+    let count = 0;
+    const provider = createProvider({
+      kind,
+      apiKey: "fixture-key",
+      accountId: "fixture",
+      gatewayId: "gateway",
+      ...(kind === "system-one"
+        ? {
+            baseURL: "http://localhost:8787",
+            defaultModel: "custom",
+            allowUnverifiedModels: true,
+          }
+        : {}),
+      fetch: async (target, init) => {
+        count++;
+        expect(String(target)).toBe(url);
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer fixture-key",
+        );
+        expect(init?.redirect).toBe("error");
+        expect(init?.signal).toBeDefined();
+        const payload = {
+          state: input.content,
+          questions: { q: { type: "noul", instructions: "Ready?" } },
+        };
+        expect(JSON.parse(init!.body as string)).toEqual(
+          wrapped ? { model, input: payload } : { model, ...payload },
+        );
+        if (kind.startsWith("cloudflare"))
+          expect(new Headers(init?.headers).get("cf-aig-gateway-id")).toBe(
+            "gateway",
+          );
+        return Response.json(
+          kind.startsWith("cloudflare")
+            ? { success: true, result: response }
+            : response,
+        );
       },
     });
-    expect(result.isError).not.toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      results: [
+    expect(await provider.evaluate(input, signal())).toEqual({
+      provider: kind,
+      model: "actual-version",
+      results: [{ id: "q", kind: "check", probability: 0.8 }],
+      usage: { inputTokens: 10, outputTokens: 2 },
+    });
+    expect(count).toBe(1);
+  }
+});
+
+test("description does not require credentials but remote dispatch does", async () => {
+  const provider = createProvider({
+    kind: "typesafe",
+    fetch: async () => {
+      throw Error("must not dispatch");
+    },
+  });
+  expect(provider.describe().provider).toBe("typesafe");
+  await expect(provider.evaluate(input, signal())).rejects.toBeInstanceOf(
+    ProviderConfigurationError,
+  );
+  const local = createProvider({
+    kind: "system-one",
+    baseURL: "http://localhost:8787",
+    defaultModel: "custom",
+    allowUnverifiedModels: true,
+    fetch: async (_, init) => {
+      expect(new Headers(init?.headers).has("authorization")).toBe(false);
+      return Response.json(response);
+    },
+  });
+  await local.evaluate(input, signal());
+});
+
+test("errors are sanitized, retain HTTP status/code/retry and never retry", async () => {
+  let calls = 0;
+  const provider = createProvider({
+    kind: "typesafe",
+    apiKey: "fixture",
+    fetch: async () => {
+      calls++;
+      return Response.json(
+        { error: { code: "limited", message: "PRIVATE" } },
+        { status: 429, headers: { "retry-after": "2" } },
+      );
+    },
+  });
+  try {
+    await provider.evaluate(input, signal());
+    throw Error("Expected rejection");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ProviderHttpError);
+    const e = error as ProviderHttpError;
+    expect(e.status).toBe(429);
+    expect(e.upstreamCode).toBe("limited");
+    expect(e.headers.get("retry-after")).toBe("2");
+    expect(e.message).not.toContain("PRIVATE");
+  }
+  expect(calls).toBe(1);
+});
+
+test("timeouts include body reads and aborts isolate concurrent requests", async () => {
+  const timed = createProvider({
+    kind: "typesafe",
+    apiKey: "fixture",
+    timeoutMs: 10,
+    fetch: async () => new Response(new ReadableStream({ start() {} })),
+  });
+  await expect(timed.evaluate(input, signal())).rejects.toBeInstanceOf(
+    RequestTimeoutError,
+  );
+  let started!: () => void;
+  const ready = new Promise<void>((r) => {
+    started = r;
+  });
+  let calls = 0;
+  const provider = createProvider({
+    kind: "typesafe",
+    apiKey: "fixture",
+    fetch: async () => {
+      if (++calls === 1) {
+        started();
+        return new Promise<Response>(() => {});
+      }
+      return Response.json(response);
+    },
+  });
+  const controller = new AbortController();
+  const cancelled = provider.evaluate(input, controller.signal);
+  await ready;
+  controller.abort();
+  await expect(cancelled).rejects.toBeInstanceOf(RequestCancelledError);
+  expect((await provider.evaluate(input, signal())).results).toHaveLength(1);
+});
+
+test("provider constraints refuse unsupported/null requests before dispatch", async () => {
+  let calls = 0;
+  const fetcher = async () => {
+    calls++;
+    return Response.json(response);
+  };
+  const router = createProvider({
+    kind: "openrouter",
+    apiKey: "fixture",
+    fetch: fetcher,
+  });
+  for (const request of [
+    { ...input, content: null },
+    { ...input, checks: [{ id: "q", question: null }] },
+    { ...input, scores: [{ id: "s", question: "Quality?", levels: [null] }] },
+    { ...input, checks: [{ id: "q", question: "Ready?", yes: "yes" }] },
+    { ...input, images: ["data:image/png;base64,YQ=="] },
+  ])
+    await expect(router.evaluate(request, signal())).rejects.toBeInstanceOf(
+      ProviderInputError,
+    );
+  const clef = createProvider({
+    kind: "cloudflare-workers",
+    accountId: "fixture",
+    apiKey: "fixture",
+    fetch: fetcher,
+  });
+  for (const request of [
+    { ...input, model: "@cf/other/model" },
+    { ...input, checks: [{ id: "q!", question: "Ready?" }] },
+    {
+      ...input,
+      checks: Array.from({ length: 65 }, (_, i) => ({
+        id: `q${i}`,
+        question: "?",
+      })),
+    },
+    { ...input, images: ["https://example.com/a.png"] },
+    { ...input, images: ["data:image/png;base64,???"] },
+    { ...input, images: Array(5).fill("data:image/png;base64,YQ==") },
+  ])
+    await expect(clef.evaluate(request, signal())).rejects.toBeInstanceOf(
+      ProviderInputError,
+    );
+  expect(calls).toBe(0);
+});
+
+test("custom adapters are single-request semantic extensions with isolated model capabilities", async () => {
+  const adapter: DecisionAdapter = {
+    id: "fixture-decision",
+    capabilities: () => ({
+      judgments: ["check"],
+      inputs: ["json", "text"],
+      mixedQuestions: false,
+      maxQuestions: 1,
+      confidence: "unavailable",
+    }),
+    prepare: (assessment, context) => ({
+      path: "/judge",
+      body: {
+        candidate: assessment.content,
+        question: assessment.checks![0]!.question,
+        selected: context.model,
+      },
+      decode: (raw) => ({
+        provider: context.provider,
+        model: context.model,
+        results: [
+          {
+            id: assessment.checks![0]!.id,
+            kind: "check",
+            value: (raw as { accepted: boolean }).accepted,
+          },
+        ],
+      }),
+    }),
+  };
+  let calls = 0;
+  const provider = createProvider(
+    {
+      kind: "custom",
+      allowUnverifiedModels: true,
+      protocol: adapter.id,
+      baseURL: "http://localhost:8787/service",
+      defaultModel: "small",
+      fetch: async (url, init) => {
+        calls++;
+        expect(String(url)).toBe("http://localhost:8787/service/judge");
+        expect(new Headers(init?.headers).has("authorization")).toBe(false);
+        expect(JSON.parse(init!.body as string).selected).toBe("large");
+        return Response.json({ accepted: true });
+      },
+    },
+    {
+      adapters: [adapter],
+      models: [
         {
-          id: "quality",
-          kind: "score",
-          value: 1.96,
-          probabilities: { "0": 0.01, "1": 0.03, "2": 0.96 },
+          provider: "custom",
+          model: "large",
+          protocol: adapter.id,
+          availability: "supported",
+          capabilities: {
+            ...adapter.capabilities({ provider: "custom", model: "large" }),
+            maxQuestions: 2,
+          },
         },
       ],
-      model: "typesafe-ai/jev",
-      usage: { inputTokens: 392, outputTokens: 18 },
-    });
-  } finally {
-    await client.close();
-    await server.close();
+    },
+  );
+  expect(provider.describe().capabilities.maxQuestions).toBe(1);
+  expect(provider.describe("large")).toMatchObject({
+    model: "large",
+    capabilitySource: "configuration",
+    capabilities: { maxQuestions: 2 },
+  });
+  expect((await provider.listModels(signal())).models.map((m) => m.id)).toEqual(
+    ["small", "large"],
+  );
+  await expect(
+    provider.evaluate(
+      {
+        ...input,
+        checks: [
+          { id: "a", question: "?" },
+          { id: "b", question: "?" },
+        ],
+      },
+      signal(),
+    ),
+  ).rejects.toBeInstanceOf(ProviderInputError);
+  expect(
+    (await provider.evaluate({ ...input, model: "large" }, signal())).results,
+  ).toEqual([{ id: "q", kind: "check", value: true }]);
+  expect(calls).toBe(1);
+});
+
+test("runtime model overrides select the same profile as discovery and enforce only its own limits", async () => {
+  let calls = 0;
+  const provider = createProvider({
+    kind: "openrouter",
+    apiKey: "fixture",
+    fetch: async (_, init) => {
+      calls++;
+      const body = JSON.parse(init!.body as string);
+      return Response.json({
+        model: body.model,
+        answers: Object.fromEntries(
+          Object.keys(body.questions).map((id) => [
+            id,
+            { type: "noul", noul: 0.9 },
+          ]),
+        ),
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    },
+  });
+  expect(provider.describe().protocol).toBe("openrouter-decisions");
+  expect(
+    provider.describe("togethercomputer/tev1-4b-experimental"),
+  ).toMatchObject({
+    protocol: "tev1-chat",
+    capabilitySource: "model",
+    capabilities: { maxQuestions: 1, maxOptions: 24 },
+  });
+  const request = {
+    content: "ready",
+    model: "perplexity/pplx-decider-v1-27b",
+    checks: Array.from({ length: 129 }, (_, i) => ({
+      id: `q${i}`,
+      question: "Ready?",
+    })),
+  };
+  await expect(provider.evaluate(request, signal())).rejects.toBeInstanceOf(
+    ProviderInputError,
+  );
+  expect(calls).toBe(0);
+  expect(
+    (
+      await provider.evaluate(
+        { ...request, checks: request.checks.slice(0, 128) },
+        signal(),
+      )
+    ).results,
+  ).toHaveLength(128);
+  expect(
+    (
+      await provider.evaluate(
+        { ...request, model: "future/decision", allowUnverifiedModel: true },
+        signal(),
+      )
+    ).results,
+  ).toHaveLength(129);
+  expect(provider.describe("future/decision")).toMatchObject({
+    availability: "unverified",
+    capabilitySource: "protocol",
+  });
+  expect(provider.describe().capabilities.maxQuestions).toBeUndefined();
+  expect(calls).toBe(2);
+});
+
+test("registry configuration and adapter routes reject ambiguity before network dispatch", async () => {
+  const adapter: DecisionAdapter = {
+    id: "fixture",
+    capabilities: () => ({
+      judgments: ["check"],
+      inputs: ["text", "json"],
+      mixedQuestions: true,
+      confidence: "unavailable",
+    }),
+    prepare: () => ({
+      path: "/judge",
+      body: {},
+      decode: () => ({ provider: "custom", model: "fixture", results: [] }),
+    }),
+  };
+  const options = {
+    kind: "custom" as const,
+    allowUnverifiedModels: true,
+    protocol: adapter.id,
+    baseURL: "http://localhost:8787/service",
+    defaultModel: "fixture",
+  };
+  for (const invalid of [
+    { ...options, protocol: "unknown" },
+    { ...options, defaultModel: undefined },
+    { ...options, baseURL: undefined },
+    { kind: "typesafe" as const, protocol: "system-one" },
+  ])
+    expect(() => createProvider(invalid, { adapters: [adapter] })).toThrow(
+      ProviderConfigurationError,
+    );
+  expect(() =>
+    createProvider(options, { adapters: [adapter, adapter] }),
+  ).toThrow(ProviderConfigurationError);
+  const profile = {
+    provider: "custom" as const,
+    model: "fixture",
+    protocol: adapter.id,
+  };
+  expect(() =>
+    createProvider(options, {
+      adapters: [adapter],
+      models: [profile, profile],
+    }),
+  ).toThrow(ProviderConfigurationError);
+  expect(() =>
+    createProvider(options, {
+      adapters: [adapter],
+      models: [{ ...profile, protocol: "unknown" }],
+    }),
+  ).toThrow(ProviderConfigurationError);
+  for (const path of [
+    "https://evil.test/judge",
+    "//evil.test/judge",
+    "/../judge",
+    "/a/%2e%2e/judge",
+    "/judge?key=secret",
+    "/judge#fragment",
+    "/a\\judge",
+    "/a/%2fjudge",
+  ]) {
+    const provider = createProvider(
+      {
+        ...options,
+        fetch: async () => {
+          throw Error("No dispatch expected");
+        },
+      },
+      {
+        adapters: [
+          {
+            ...adapter,
+            prepare: () => ({
+              ...adapter.prepare(input, {
+                provider: "custom",
+                model: "fixture",
+              }),
+              path,
+            }),
+          },
+        ],
+      },
+    );
+    await expect(provider.evaluate(input, signal())).rejects.toBeInstanceOf(
+      ProviderConfigurationError,
+    );
   }
 });
 
-test("gateway rewrites stay scoped and catalog truncation is not hidden", async () => {
-  for (const url of [
-    "https://example.com/api/v1/systemone",
-    "https://openrouter.ai/unrelated/v1/systemone",
-    "https://api.cloudflare.com/unrelated/v1/systemone",
-  ]) {
-    const original = Response.json({ unchanged: true });
-    const init = { method: "POST", body: "{}" };
+test("Clef sends flash and multiple embedded image representations without data loss", async () => {
+  const images = [
+    "DATA:image/png;base64,YQ==",
+    { content_type: "image/jpeg" as const, base64: "Yg==" },
+  ];
+  const provider = createProvider({
+    kind: "cloudflare-workers",
+    accountId: "fixture",
+    apiKey: "fixture",
+    defaultModel: "@cf/cloudflare/clef-flash",
+    fetch: async (url, init) => {
+      expect(String(url)).toEndWith("/ai/run/@cf/cloudflare/clef-flash");
+      expect(JSON.parse(init!.body as string).model).toBe("clef-flash");
+      expect(JSON.parse(init!.body as string).images).toEqual(images);
+      return Response.json(response);
+    },
+  });
+  await provider.evaluate({ ...input, images }, signal());
+});
+
+test("Clef ID, option labels and cardinality follow its own schema", async () => {
+  let calls = 0;
+  const clef = createProvider({
+    kind: "cloudflare-workers",
+    baseURL: "http://localhost:8787/ai",
+    fetch: async (_, init) => {
+      calls++;
+      const body = JSON.parse(init!.body as string);
+      return Response.json({
+        model: "clef",
+        answers: Object.fromEntries(
+          Object.entries(body.questions).map(([id, q]) => [
+            id,
+            (q as { type: string }).type === "choice"
+              ? {
+                  type: "choice",
+                  choice: "中文",
+                  confidence: 0.8,
+                  probabilities: { 中文: 0.8, "other option": 0.2 },
+                }
+              : { type: "noul", noul: 0.8 },
+          ]),
+        ),
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    },
+    apiKey: "fixture",
+  });
+  const request = {
+    content: "ready",
+    classifications: [
+      {
+        id: "q.dot",
+        question: "Label?",
+        options: { 中文: null, "other option": null },
+      },
+    ],
+    checks: [{ id: "q".repeat(100), question: "Ready?" }],
+  };
+  expect((await clef.evaluate(request, signal())).results[0]).toMatchObject({
+    id: "q.dot",
+    value: "中文",
+  });
+  for (const invalid of [
+    { ...input, checks: [{ id: "q".repeat(101), question: "Ready?" }] },
+    { ...input, checks: [{ id: "q", question: "" }] },
+    {
+      content: "ready",
+      scores: [{ id: "s", question: "Quality?", levels: ["one"] }],
+    },
+    {
+      content: "ready",
+      classifications: [
+        {
+          id: "c",
+          question: "Label?",
+          options: Object.fromEntries(
+            Array.from({ length: 256 }, (_, i) => [`c${i}`, null]),
+          ),
+        },
+      ],
+    },
+  ])
+    await expect(clef.evaluate(invalid, signal())).rejects.toBeInstanceOf(
+      ProviderInputError,
+    );
+  expect(calls).toBe(1);
+});
+
+test("Clef enforces decoded per-image/aggregate and whole-body limits before HTTP", async () => {
+  let calls = 0;
+  const clef = createProvider({
+    kind: "cloudflare-workers",
+    accountId: "fixture",
+    apiKey: "fixture",
+    fetch: async () => {
+      calls++;
+      return Response.json(response);
+    },
+  });
+  const image = (bytes: number) => ({
+    content_type: "image/png" as const,
+    base64: Buffer.alloc(bytes).toString("base64"),
+  });
+  for (const invalid of [
+    { ...input, images: [image(4 * 1024 * 1024 + 1)] },
+    {
+      ...input,
+      images: [
+        image(3 * 1024 * 1024),
+        image(3 * 1024 * 1024),
+        image(3 * 1024 * 1024),
+      ],
+    },
+    {
+      ...input,
+      content: "a".repeat(3 * 1024 * 1024),
+      images: [image(4 * 1024 * 1024), image(4 * 1024 * 1024)],
+    },
+  ])
+    await expect(clef.evaluate(invalid, signal())).rejects.toBeInstanceOf(
+      ProviderInputError,
+    );
+  expect(calls).toBe(0);
+});
+
+test("OpenRouter and custom profiles admit one score level and generic unbounded option counts", async () => {
+  for (const kind of ["openrouter", "system-one"] as const) {
+    const provider = createProvider({
+      kind,
+      apiKey: "fixture",
+      ...(kind === "system-one"
+        ? {
+            baseURL: "http://localhost:8787",
+            defaultModel: "custom",
+            allowUnverifiedModels: true,
+          }
+        : {}),
+      fetch: async () =>
+        Response.json({
+          model: "actual",
+          answers: { s: { type: "score", score: 0 } },
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+    });
     expect(
-      await providerFetch(async (target, options) => {
-        expect(target).toBe(url);
-        expect(options).toBe(init);
-        return original;
-      })(url, init),
-    ).toBe(original);
+      (
+        await provider.evaluate(
+          {
+            content: "ready",
+            scores: [{ id: "s", question: "Quality?", levels: ["one"] }],
+          },
+          signal(),
+        )
+      ).results,
+    ).toEqual([{ id: "s", kind: "score", value: 0 }]);
   }
-  const original = Response.json({
-    data: Array.from({ length: 100 }, () => ({ id: "typesafe/jev" })),
+});
+
+test("configuration validates URLs and keeps provider selection explicit", async () => {
+  for (const baseURL of [
+    "not-a-url",
+    "https://example.com?token=private",
+    "https://user:private@example.com",
+    "ftp://example.com",
+    "https://example.com/#fragment",
+  ])
+    expect(() =>
+      createProvider({ kind: "system-one", defaultModel: "custom", baseURL }),
+    ).toThrow(ProviderConfigurationError);
+  expect(() => createProvider({ kind: "system-one" })).toThrow(
+    ProviderConfigurationError,
+  );
+  expect(() => createProvider({ kind: "cloudflare-workers" })).toThrow(
+    ProviderConfigurationError,
+  );
+  const provider = createProvider({
+    kind: "openrouter",
+    baseURL: "http://localhost:8787/api",
+    apiKey: "fixture",
+    fetch: async (url) => {
+      expect(String(url)).toBe("http://localhost:8787/api/alpha/decisions");
+      return Response.json(response);
+    },
+  });
+  await provider.evaluate(input, signal());
+});
+
+test("OpenRouter allows one choice and Clef accepts single-side check definitions", async () => {
+  const router = createProvider({
+    kind: "openrouter",
+    apiKey: "fixture",
+    fetch: async () =>
+      Response.json({
+        model: "actual",
+        answers: { c: { type: "choice", choice: "only" } },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
   });
   expect(
-    await providerFetch(async () => original)(
-      "https://api.cloudflare.com/client/v4/accounts/fixture/ai/v1/models",
-    ),
-  ).toBe(original);
+    (
+      await router.evaluate(
+        {
+          content: "ready",
+          classifications: [
+            { id: "c", question: "Label?", options: { only: null } },
+          ],
+        },
+        signal(),
+      )
+    ).results,
+  ).toEqual([{ id: "c", kind: "classification", value: "only" }]);
+  const clef = createProvider({
+    kind: "cloudflare-workers",
+    accountId: "fixture",
+    apiKey: "fixture",
+    fetch: async (_, init) => {
+      expect(JSON.parse(init!.body as string).questions.q.criteria).toEqual({
+        true: "supported",
+      });
+      return Response.json(response);
+    },
+  });
+  await clef.evaluate(
+    {
+      content: "ready",
+      checks: [{ id: "q", question: "Ready?", yes: "supported" }],
+    },
+    signal(),
+  );
 });
 
-test("MCP rejects failed Cloudflare envelopes and unsupported OpenRouter inputs", async () => {
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import(
-    "@modelcontextprotocol/sdk/inMemory.js"
-  );
-  const { createServer } = await import("../src/server.ts");
-  for (const cloudflare of [true, false]) {
-    let calls = 0;
-    const sdk = new TypeSafeClient({
+test("generic protocols do not inherit native cardinality limits", async () => {
+  for (const kind of ["openrouter", "system-one"] as const) {
+    const provider = createProvider({
+      kind,
       apiKey: "fixture",
-      baseURL: cloudflare
-        ? "https://api.cloudflare.com/client/v4/accounts/fixture/ai"
-        : "https://openrouter.ai/api",
-      logLevel: "off",
-      retry: { maxRetries: 0 },
-      fetch: providerFetch(async () => {
-        calls++;
+      ...(kind === "system-one"
+        ? {
+            baseURL: "http://localhost:8787",
+            defaultModel: "custom",
+            allowUnverifiedModels: true,
+          }
+        : {}),
+      fetch: async (_, init) => {
+        const body = JSON.parse(init!.body as string);
         return Response.json({
-          success: false,
-          errors: [{ message: "private" }],
-          result: {
-            model: "jev",
-            answers: { q: { type: "noul", noul: 1 } },
-            usage: { input_tokens: 1, output_tokens: 1 },
-          },
+          model: "actual",
+          answers: Object.fromEntries(
+            Object.entries(body.questions).map(([id, q]) => [
+              id,
+              (q as { type: string }).type === "choice"
+                ? { type: "choice", choice: "c0" }
+                : { type: "score", score: 0 },
+            ]),
+          ),
+          usage: { input_tokens: 1, output_tokens: 1 },
         });
-      }),
+      },
     });
-    const server = createServer(sdk),
-      client = new Client({ name: "gateway-contract", version: "1" });
-    const [a, b] = InMemoryTransport.createLinkedPair();
-    await server.connect(a);
-    await client.connect(b);
-    try {
-      const result = await client.callTool({
-        name: "check",
-        arguments: {
-          content: cloudflare ? "ready" : null,
-          items: [{ id: "q", question: "Ready?" }],
+    const request = {
+      content: "ready",
+      classifications: [
+        {
+          id: "c",
+          question: "Label?",
+          options: Object.fromEntries(
+            Array.from({ length: 256 }, (_, i) => [`c${i}`, null]),
+          ),
         },
-      });
-      expect(result.isError).toBe(true);
-      expect(result.structuredContent).toBeUndefined();
-      expect(JSON.stringify(result.content)).toContain(
-        cloudflare ? "INVALID_RESPONSE" : "INVALID_REQUEST",
-      );
-      expect(JSON.stringify(result.content)).not.toContain("private");
-      expect(calls).toBe(cloudflare ? 1 : 0);
-    } finally {
-      await client.close();
-      await server.close();
-    }
+      ],
+      scores: Array.from({ length: 65 }, (_, i) => ({
+        id: `s${i}`,
+        question: "Quality?",
+        levels: Array(11).fill("level"),
+      })),
+    };
+    expect((await provider.evaluate(request, signal())).results).toHaveLength(
+      66,
+    );
   }
 });
 
-test("Cloudflare AI Gateway selection is scoped to its inference route", async () => {
-  const body = JSON.stringify({
-    model: "typesafe/jev",
-    state: "ready",
-    questions: {},
+test("native Jev protocols admit 65 questions while Clef alone advertises and enforces 64", async () => {
+  const checks = Array.from({ length: 65 }, (_, i) => ({
+    id: `q${i}`,
+    question: "Ready?",
+  }));
+  const provider = createProvider({
+    kind: "typesafe",
+    apiKey: "fixture",
+    fetch: async () =>
+      Response.json({
+        model: "actual",
+        answers: Object.fromEntries(
+          checks.map((q) => [q.id, { type: "noul", noul: 0.8 }]),
+        ),
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
   });
-  for (const gatewayId of [undefined, "selected-gateway"]) {
-    for (const cloudflare of [true, false]) {
-      const init = {
-        method: "POST",
-        headers: { authorization: "Bearer fixture" },
-        body,
-      };
-      await providerFetch(
-        async (_, options) => {
-          const headers = new Headers(options?.headers);
-          expect(headers.get("authorization")).toBe("Bearer fixture");
-          expect(headers.get("cf-aig-gateway-id")).toBe(
-            cloudflare ? (gatewayId ?? null) : null,
-          );
-          return Response.json({
-            model: "jev",
-            answers: {},
-            usage: { input_tokens: 0, output_tokens: 0 },
-          });
-        },
-        { cloudflareGatewayId: gatewayId },
-      )(
-        cloudflare
-          ? "https://api.cloudflare.com/client/v4/accounts/fixture/ai/v1/systemone"
-          : "https://openrouter.ai/api/v1/systemone",
-        init,
-      );
-    }
+  expect(provider.describe().capabilities.maxQuestions).toBeUndefined();
+  expect(
+    (await provider.evaluate({ content: "ready", checks }, signal())).results,
+  ).toHaveLength(65);
+  const clef = createProvider({
+    kind: "cloudflare-workers",
+    accountId: "fixture",
+    apiKey: "fixture",
+    fetch: async () => {
+      throw Error("No dispatch expected");
+    },
+  });
+  expect(clef.describe().capabilities.maxQuestions).toBe(64);
+  await expect(
+    clef.evaluate({ content: "ready", checks }, signal()),
+  ).rejects.toBeInstanceOf(ProviderInputError);
+});
+
+test("Clef schema preserves nullable optional yes/no definitions", async () => {
+  for (const no of ["unsupported", null]) {
+    const clef = createProvider({
+      kind: "cloudflare-workers",
+      accountId: "fixture",
+      apiKey: "fixture",
+      fetch: async (_, init) => {
+        expect(JSON.parse(init!.body as string).questions.q.criteria).toEqual({
+          true: null,
+          false: no,
+        });
+        return Response.json(response);
+      },
+    });
+    await clef.evaluate(
+      { content: "", checks: [{ id: "q", question: "Ready?", yes: null, no }] },
+      signal(),
+    );
   }
 });

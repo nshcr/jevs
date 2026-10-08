@@ -15,11 +15,11 @@ codex plugin add jevs@jevs
 
 ## 配置与启动
 
-从 Codex 进程环境提供 `TYPESAFE_API_KEY`，可选 `TYPESAFE_DEFAULT_MODEL`、`TYPESAFE_BASE_URL`，以及 `JEVS_MAX_CONCURRENCY`、`JEVS_MAX_QUEUE`、`JEVS_QUEUE_TIMEOUT_MS`。桌面应用未必继承终端环境，需在实际宿主验证。凭据不写入插件、Git 或工具参数。
+从 Codex 进程环境提供 `JEVS_PROVIDER`（默认 `typesafe`）、`JEVS_API_KEY`，`custom` provider 还需 `JEVS_PROTOCOL`（切换其他 provider 时清除），可选 `JEVS_ALLOW_UNVERIFIED_MODELS`、`JEVS_DEFAULT_MODEL`、`JEVS_BASE_URL`、`JEVS_REQUEST_TIMEOUT_MS`，以及 `JEVS_MAX_CONCURRENCY`、`JEVS_MAX_QUEUE`、`JEVS_QUEUE_TIMEOUT_MS`。Cloudflare 使用 `CLOUDFLARE_ACCOUNT_ID`，网关可用 `CLOUDFLARE_AI_GATEWAY_ID`。旧 `TYPESAFE_*` 配置需要迁移。桌面应用未必继承终端环境，需在实际宿主验证。凭据不写入插件、Git 或工具参数。
 
 其他供应商专用环境变量及地址、模型配置见 [供应商接入](providers.md)，并发参数见 [性能与负载控制](performance.md#调度参数)。
 
-新建任务后调用 `jev_guide`；无密钥也可读取指导。真实推理需要配置的服务商密钥、账户权限及网络。bundle 使用相对插件目录的 `bun dist/index.js`，无需 npm 安装。
+新建任务后调用 `provider_info` 与 `decision_guide`；无密钥也可读取指导。远端推理需按 provider 配置凭据、账户权限及网络；`clef-python` 需要可信本地模型目录与 Python 运行依赖。bundle 使用相对插件目录的 `bun dist/index.js`，无需 npm 安装。
 
 ## 更新
 

@@ -1,6 +1,6 @@
 {
   "name": "jevs",
-  "description": "Jev structured judgments through simple MCP tools, with caller guidance.",
+  "description": "Finite-answer decisions through MCP across Jev, Clef and native decision providers.",
   "author": {
     "name": "nshcr"
   },
@@ -9,11 +9,13 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Jevs",
-    "shortDescription": "Classify, score and verify with Jev.",
-    "longDescription": "Classify, score and check evidence with Jev, including structured judgments, independent record batches and bundled caller guidance. Requires Bun and server-side credentials for TypeSafe or a compatible provider.",
+    "shortDescription": "Classify, score and check with decision models.",
+    "longDescription": "Classify, score and check supplied evidence with configured decision providers, including Workers AI Clef images, independent record batches, capability discovery and bundled guidance. Requires Bun and provider configuration; credentials stay server-side.",
     "developerName": "nshcr",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": ["Use Jev to classify and verify this content."]
+    "defaultPrompt": [
+      "Use the configured decision model to classify and verify this content."
+    ]
   }
 }

@@ -29,7 +29,7 @@ async function fixture(
         stderr: "ignore",
         env: {
           ...process.env,
-          TYPESAFE_API_KEY: "audit-fixture-credential-value",
+          JEVS_API_KEY: "audit-fixture-credential-value",
         },
       });
       return p.exited;

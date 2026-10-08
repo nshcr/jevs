@@ -1,7 +1,7 @@
 {
   "name": "jevs",
-  "version": "0.1.3",
-  "description": "Jev structured judgments through MCP tools and a Codex plugin, using the official TypeSafe SDK and Bun",
+  "version": "0.2.0",
+  "description": "Provider-neutral decision models through MCP: OpenAI Decisions, System One, OpenRouter Decisions and Cloudflare Clef",
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/index.ts",
@@ -10,12 +10,11 @@
     "check": "bun scripts/governance.ts && bun scripts/audit.ts && prettier --check . && tsc --noEmit",
     "test": "bun test ./tests",
     "build": "bun scripts/build.ts",
-    "verify": "bun run check && bun run test && bun run build && bun scripts/smoke.ts && bun scripts/plugin-build.ts && bun scripts/audit.ts --assets",
+    "verify": "bun run check && bun run test && bun run build && bun --no-env-file scripts/adapter-experiment.ts --entry dist/index.js && bun --no-env-file scripts/openai-decisions-experiment.ts --entry dist/index.js && bun --no-env-file scripts/clef-python-experiment.ts --entry dist/index.js && bun scripts/smoke.ts && bun scripts/plugin-build.ts && bun scripts/audit.ts --assets",
     "version:set": "bun scripts/version.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "@typesafe-ai/sdk": "0.6.0",
     "zod": "4.6.5"
   },
   "devDependencies": {

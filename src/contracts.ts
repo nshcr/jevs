@@ -1,22 +1,15 @@
 import { z } from "zod";
-import type { Questions } from "@typesafe-ai/sdk";
+import { hasPrototypeKey } from "./json.ts";
 
 // Reject before Zod's object parsing can silently discard this JSON key.
 export function safeJson<T extends z.ZodType>(schema: T) {
   return z.preprocess((value, ctx) => {
-    const pending = [value];
-    while (pending.length) {
-      const next = pending.pop();
-      if (next && typeof next === "object") {
-        if (Object.hasOwn(next, "__proto__")) {
-          ctx.addIssue({
-            code: "custom",
-            message: "JSON key __proto__ is not supported",
-          });
-          return z.NEVER;
-        }
-        pending.push(...Object.values(next));
-      }
+    if (hasPrototypeKey(value)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "JSON key __proto__ is not supported",
+      });
+      return z.NEVER;
     }
     return value;
   }, schema);
@@ -31,88 +24,127 @@ export const entry = safeJson(
 );
 const probability = z.number();
 const distribution = z.record(z.string(), probability);
-const answer = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("choice"),
-    choice: z.string(),
-    confidence: probability,
-    probabilities: distribution,
-  }),
-  z.object({
-    type: z.literal("score"),
-    score: z.number(),
-    confidence: probability,
-    probabilities: distribution,
-    legend: z.record(z.string(), entry),
-  }),
-  z.object({ type: z.literal("noul"), noul: probability }),
-]);
-const responseSchema = safeJson(
-  z.object({
-    model: z.string().min(1),
-    answers: z.record(z.string(), answer),
-    usage: z.object({
-      input_tokens: z.number(),
-      output_tokens: z.number(),
-    }),
-  }),
-);
-export class ResponseContractError extends Error {}
-function requireContract(ok: boolean) {
-  if (!ok)
-    throw new ResponseContractError("Invalid TypeSafe response contract");
-}
-function sameKeys(a: object, keys: string[]) {
-  return (
-    Object.keys(a).length === keys.length &&
-    keys.every((k) => Object.hasOwn(a, k))
-  );
-}
-export function validateResponse(raw: unknown, questions: Questions) {
-  const parsed = responseSchema.safeParse(raw);
-  if (!parsed.success)
-    throw new ResponseContractError("Invalid TypeSafe response shape");
-  const response = parsed.data;
-  requireContract(sameKeys(response.answers, Object.keys(questions)));
-  for (const [id, q] of Object.entries(questions)) {
-    const a = response.answers[id]!;
-    requireContract(a.type === q.type);
-  }
-  return response;
-}
+export const choiceValue = z.union([z.string(), z.boolean()]);
+// Missing measurements stay missing; provider confidence is not comparable
+// across models. Values are preserved without normalization or recomputation.
 export const outputSchema = z.object({
+  provider: z.string().min(1),
+  protocol: z.string().min(1).optional(),
   results: z.array(
     z.discriminatedUnion("kind", [
       z.object({
         id: z.string(),
         kind: z.literal("classification"),
-        value: z.string(),
-        confidence: probability,
-        probabilities: distribution,
+        value: choiceValue,
+        confidence: probability.optional(),
+        probabilities: z
+          .union([
+            distribution,
+            z.array(z.object({ value: choiceValue, probability })),
+          ])
+          .optional(),
       }),
       z.object({
         id: z.string(),
         kind: z.literal("score"),
         value: z.number(),
-        confidence: probability,
-        probabilities: distribution,
-        levels: z.record(z.string(), entry),
+        confidence: probability.optional(),
+        probabilities: distribution.optional(),
+        levelProbabilities: z
+          .array(
+            z.object({
+              value: z.number().int(),
+              label: z.string(),
+              probability,
+            }),
+          )
+          .optional(),
+        levels: z.record(z.string(), entry).optional(),
       }),
-      z.object({ id: z.string(), kind: z.literal("check"), probability }),
+      z
+        .object({
+          id: z.string(),
+          kind: z.literal("check"),
+          probability: probability.optional(),
+          value: z.boolean().optional(),
+        })
+        .refine(
+          (v) => v.probability !== undefined || v.value !== undefined,
+          "A check must report a probability or a boolean value",
+        ),
+      z.object({
+        id: z.string(),
+        kind: z.literal("refusal"),
+        judgment: z.enum(["classification", "score", "check"]),
+      }),
     ]),
   ),
   model: z.string().min(1),
-  usage: z.object({
-    inputTokens: z.number(),
-    outputTokens: z.number(),
-  }),
+  responseId: z.string().optional(),
+  upstreamProvider: z.string().optional(),
+  usage: z
+    .object({
+      inputTokens: z.number().optional(),
+      outputTokens: z.number().optional(),
+      cachedInputTokens: z.number().optional(),
+      cacheWriteTokens: z.number().optional(),
+      reasoningTokens: z.number().optional(),
+      totalTokens: z.number().optional(),
+      cost: z.number().optional(),
+    })
+    .optional(),
 });
-export const modelsSchema = z.object({
+export const capabilitiesSchema = z.object({
+  judgments: z.array(z.enum(["classification", "score", "check"])),
+  inputs: z.array(z.enum(["text", "json", "image", "video"])),
+  mixedQuestions: z.boolean(),
+  messages: z.boolean().optional(),
+  imageDetail: z.boolean().optional(),
+  labeledScores: z.boolean().optional(),
+  safetyIdentifier: z.boolean().optional(),
+  mediaOptions: z.boolean().optional(),
+  typedChoices: z.boolean().optional(),
+  refusals: z.boolean().optional(),
+  maxQuestions: z.number().int().positive().optional(),
+  maxOptions: z.number().int().positive().optional(),
+  minOptions: z.number().int().positive().optional(),
+  maxScoreLevels: z.number().int().positive().optional(),
+  minScoreLevels: z.number().int().positive().optional(),
+  maxImages: z.number().int().nonnegative().optional(),
+  confidence: z.enum(["provider-defined", "unavailable"]),
+});
+export const providerSchema = z.object({
+  provider: z.string().min(1),
+  protocol: z.string().min(1),
+  defaultModel: z.string().min(1),
+  model: z.string().min(1),
+  availability: z.enum(["supported", "unverified", "unsupported"]),
+  capabilitySource: z.enum(["model", "protocol", "configuration"]),
+  reason: z.string().optional(),
+  unverifiedModelsAllowed: z.boolean().optional(),
+  toolSupport: z
+    .object({
+      classify: z.enum(["supported", "unverified", "unsupported"]),
+      score: z.enum(["supported", "unverified", "unsupported"]),
+      check: z.enum(["supported", "unverified", "unsupported"]),
+      assess_structure: z.enum(["supported", "unverified", "unsupported"]),
+      assess_batch: z.enum(["supported", "unverified", "unsupported"]),
+    })
+    .optional(),
+  capabilities: capabilitiesSchema,
+});
+export const modelsSchema = providerSchema.extend({
+  source: z.enum(["remote", "configured"]),
+  complete: z.boolean(),
   models: z.array(
     z.object({
-      name: z.string().min(1),
-      description: z.string(),
-      release_date: z.string(),
+      id: z.string().min(1),
+      description: z.string().optional(),
+      protocol: z.string().optional(),
+      availability: z.enum(["supported", "unverified", "unsupported"]),
+      capabilitySource: z.enum(["model", "protocol", "configuration"]),
+      reason: z.string().optional(),
+      capabilities: capabilitiesSchema.optional(),
     }),
   ),
 });

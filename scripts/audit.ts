@@ -30,8 +30,10 @@ function safePath(path: string) {
   );
 }
 function checkText(text: string, path: string) {
-  const credential = process.env.TYPESAFE_API_KEY?.trim();
-  assert(!credential || !text.includes(credential), `Credential in ${path}`);
+  for (const key of ["JEVS_API_KEY", "TYPESAFE_API_KEY"]) {
+    const credential = process.env[key]?.trim();
+    assert(!credential || !text.includes(credential), `Credential in ${path}`);
+  }
   assert(
     !/(?:\/Users\/|\/home\/)[a-zA-Z0-9_.-]+\//.test(text),
     `Personal filesystem path in ${path}`,

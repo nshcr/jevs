@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { APIUserAbortError } from "@typesafe-ai/sdk";
+import { RequestCancelledError } from "./failures.ts";
 import { errorDetails, errorSchema } from "./errors.ts";
 import { outputSchema } from "./contracts.ts";
 import { batchSchema, type Assessment } from "./tasks.ts";
@@ -31,11 +31,9 @@ export async function runBatch(
       const record = records[index];
       if (!record) return;
       try {
-        if (signal.aborted) throw new APIUserAbortError();
-        const result = await evaluate(
-          { ...questions, content: record.content },
-          signal,
-        );
+        if (signal.aborted) throw new RequestCancelledError();
+        const { id: _, ...context } = record;
+        const result = await evaluate({ ...questions, ...context }, signal);
         results[index] = { id: record.id, status: "ok", result };
       } catch (error) {
         results[index] = {

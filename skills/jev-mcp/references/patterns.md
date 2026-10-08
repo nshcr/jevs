@@ -1,14 +1,16 @@
-# Composing Jev tools
+# Composing decision tools
 
-These patterns keep the caller in control. Use the examples topic for runnable payloads.
+These patterns keep the caller in control. Use the examples topic for runnable payloads. Check provider_info for the selected model's toolSupport, availability, evidence capabilities and optional measurements before selecting a pattern; a provider-defined confidence field does not guarantee common calibration.
+
+A refusal is an unanswered judgment. Handle it before selection, ranking, thresholding or arithmetic; retain other successful judgments and let caller policy decide whether to gather evidence or escalate. Do not substitute zero/false or treat it as a transport retry. Unverified models require an explicit per-call/host attempt, which does not establish model support.
 
 ## Multi-label detection
 
-Use one check per label when multiple labels can apply. A classify item picks exactly one alternative; its probabilities compete and are not independent label probabilities. Apply per-label thresholds outside Jev.
+Use one check per label when multiple labels can apply. A classify item picks exactly one alternative; its probabilities compete and are not independent label probabilities. For probabilistic checks, apply per-label calibrated thresholds outside the model. For boolean-only checks, use the returned value without inventing probabilities.
 
 ## Candidate selection and extraction
 
-Find candidate spans from the source first using caller-side parsing or retrieval. Put candidates in classify options, with stable IDs and source spans in their descriptions. Include a no-match option; after selection copy the original candidate value rather than asking Jev to invent it. Candidate recall bounds extraction recall. Check source presence separately when useful. Use assess_structure to select a value and judge its attributes in one call when independent.
+Find candidate spans from the source first using caller-side parsing or retrieval. Put candidates in classify options, with stable IDs and source spans in their descriptions. Include a no-match option; after selection copy the original candidate value rather than asking the model to invent it. Candidate recall bounds extraction recall. Check source presence separately when useful. Use assess_structure to select a value and judge its attributes in one call when independent.
 
 ## Ranking
 
@@ -20,7 +22,7 @@ Classify among the current node's children, including subtree descriptions where
 
 ## Composite scoring and routing
 
-Score independent dimensions together. For a rubric of length L, value/(L-1) puts its expected position on 0–1; reverse direction if that dimension means cost rather than benefit. Combine comparable dimensions using caller-defined weights. Keep veto conditions as checks rather than averaging serious violations away. Changing weights need not rerun Jev if evidence and rubric meanings are unchanged.
+Score independent dimensions together. For a System One rubric of length L greater than one, value/(L-1) puts its expected position on 0–1; reverse direction if that dimension means cost rather than benefit. Combine comparable dimensions using caller-defined weights. Keep veto conditions as checks rather than averaging serious violations away. Changing weights need not rerun the model if evidence and rubric meanings are unchanged.
 
 Use classify to select an allowed handler and other items to select known arguments. Include explicit premises in branch-specific questions, then use only the selected branch's answers. Selecting a function does not execute it or grant authorization.
 
@@ -32,7 +34,7 @@ Separate observations from inferred claims. Include an insufficient-evidence out
 
 ## Uncertainty and changing state
 
-Several acceptable alternatives can spread probability without making a harmless preference choice unusable. Apply consequence-sensitive thresholds to the answers actually used; ignore uncertainty on unused branches. A check near 0.5 indicates similar probabilities for yes and no, not moderate intensity.
+Several acceptable alternatives can spread probability without making a harmless preference choice unusable. Apply consequence-sensitive thresholds to the answers actually used; ignore uncertainty on unused branches. When a check supplies a probability, a value near 0.5 indicates similar probabilities for yes and no, not moderate intensity. A boolean-only result exposes no such uncertainty measurement.
 
 Associate results with the evidence snapshot or revision that produced them. Before applying a judgment to changing state, check whether relevant facts or criteria changed; if they did, reassess using current evidence. Keep observed facts separate from inferred state, and let the caller bound each next step.
 
@@ -40,4 +42,4 @@ Associate results with the evidence snapshot or revision that produced them. Bef
 
 Test representative inputs and the resulting behavior, not just whether the tool returns valid JSON. For a failure, inspect the exact content, questions, candidate coverage, answers, caller composition and observed outcome. Distinguish missing evidence, semantic misjudgment, caller logic errors and service failures before choosing a remedy.
 
-Independent-question and record batching follow the entry guide. Extra judgments still consume budget: measure usage and end-to-end latency. Reduce irrelevant context or split independent work while retaining the evidence each judgment needs.
+Independent-question and record batching follow the entry guide. Extra judgments still consume budget: measure available usage and end-to-end latency. Missing usage is unknown, not zero cost. Reduce irrelevant context or split independent work while retaining the evidence each judgment needs.

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { TypeSafeClient } from "@typesafe-ai/sdk";
+import { createProvider } from "../src/provider.ts";
+import type { DecisionProvider } from "../src/decision.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.ts";
@@ -7,7 +8,7 @@ const request = (id: string) => ({
   name: "check",
   arguments: { content: id, items: [{ id, question: "Is this present?" }] },
 });
-async function connect(sdk: TypeSafeClient) {
+async function connect(sdk: DecisionProvider) {
   const server = createServer(sdk),
     client = new Client({ name: "runtime", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -30,17 +31,17 @@ function response(id: string) {
   });
 }
 
-test("cancelling one concurrent call aborts its SDK request without affecting another", async () => {
+test("cancelling one concurrent call aborts its provider request without affecting another", async () => {
   const started = Promise.withResolvers<void>();
   const aborted = Promise.withResolvers<void>();
   let calls = 0;
   const ctx = await connect(
-    new TypeSafeClient({
+    createProvider({
+      kind: "system-one",
+      allowUnverifiedModels: true,
       baseURL: "https://api.typesafe.ai",
       defaultModel: "fixture",
       apiKey: "mock",
-      logLevel: "off",
-      retry: { maxRetries: 0 },
       fetch: async (_, init) => {
         calls++;
         const id = JSON.parse(init!.body as string).state;
@@ -80,17 +81,17 @@ test("cancelling one concurrent call aborts its SDK request without affecting an
   }
 });
 
-test("SDK timeout reports an unknown completion with retries disabled", async () => {
+test("Provider timeout reports an unknown completion with retries disabled", async () => {
   let calls = 0,
     aborts = 0;
   const ctx = await connect(
-    new TypeSafeClient({
+    createProvider({
+      kind: "system-one",
+      allowUnverifiedModels: true,
       baseURL: "https://api.typesafe.ai",
       defaultModel: "fixture",
       apiKey: "mock",
-      timeout: 15,
-      logLevel: "off",
-      retry: { maxRetries: 0 },
+      timeoutMs: 15,
       fetch: async (_, init) => {
         calls++;
         return new Promise<Response>((_, reject) =>
@@ -120,12 +121,12 @@ test("SDK timeout reports an unknown completion with retries disabled", async ()
 
 test("rate limit preserves numeric retry delay without leaking upstream details", async () => {
   const ctx = await connect(
-    new TypeSafeClient({
+    createProvider({
+      kind: "system-one",
+      allowUnverifiedModels: true,
       baseURL: "https://api.typesafe.ai",
       defaultModel: "fixture",
       apiKey: "mock",
-      logLevel: "off",
-      retry: { maxRetries: 0 },
       fetch: async () =>
         Response.json(
           { message: "SECRET_PAYLOAD" },
@@ -145,10 +146,12 @@ test("rate limit preserves numeric retry delay without leaking upstream details"
   }
 });
 
-test("advertised schemas expose rubric bounds and reject extra model-list arguments", async () => {
+test("advertised schemas expose provider-independent minimums and reject extra model-list arguments", async () => {
   let calls = 0;
   const ctx = await connect(
-    new TypeSafeClient({
+    createProvider({
+      kind: "system-one",
+      allowUnverifiedModels: true,
       baseURL: "https://api.typesafe.ai",
       defaultModel: "fixture",
       apiKey: "mock",
@@ -166,14 +169,14 @@ test("advertised schemas expose rubric bounds and reject extra model-list argume
     const classify = JSON.stringify(
       tools.find((t) => t.name === "classify")!.inputSchema,
     );
-    expect(score).toContain('"minItems":2');
-    expect(score).toContain('"maxItems":10');
-    expect(classify).toContain('"minProperties":2');
-    expect(classify).toContain('"maxProperties":255');
+    expect(score).toContain('"minItems":1');
+    expect(score).not.toContain('"maxItems":10');
+    expect(classify).toContain('"minProperties":1');
+    expect(classify).not.toContain('"maxProperties":255');
     expect(
       (
         await ctx.client.callTool({
-          name: "jev_list_models",
+          name: "list_models",
           arguments: { model: "accidental" },
         })
       ).isError,

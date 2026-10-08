@@ -1,17 +1,18 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { TypeSafeClient } from "@typesafe-ai/sdk";
+import { createProvider } from "../src/provider.ts";
 import { createServer } from "../src/server.ts";
 import examples from "../skills/jev-mcp/references/examples.json";
 
 test("guide discovery is local and every published example is callable", async () => {
   let calls = 0;
-  const sdk = new TypeSafeClient({
+  const sdk = createProvider({
+    kind: "system-one",
+    allowUnverifiedModels: true,
     baseURL: "https://api.typesafe.ai",
     defaultModel: "fixture",
     apiKey: "mock",
-    logLevel: "off",
     fetch: async (_, init) => {
       calls++;
       const request = JSON.parse(init!.body as string);
@@ -59,7 +60,7 @@ test("guide discovery is local and every published example is callable", async (
   await client.connect(b);
   try {
     const defaultGuide = await client.callTool({
-      name: "jev_guide",
+      name: "decision_guide",
       arguments: {},
     });
     expect((defaultGuide.structuredContent as { topic: string }).topic).toBe(
@@ -70,7 +71,7 @@ test("guide discovery is local and every published example is callable", async (
     for (const resource of resources.resources) {
       const topic = resource.uri.split("/").at(-1)!;
       const guide = await client.callTool({
-        name: "jev_guide",
+        name: "decision_guide",
         arguments: { topic },
       });
       const read = await client.readResource({ uri: resource.uri });
@@ -81,7 +82,7 @@ test("guide discovery is local and every published example is callable", async (
     }
     expect(calls).toBe(0);
     const published = await client.callTool({
-      name: "jev_guide",
+      name: "decision_guide",
       arguments: { topic: "examples" },
     });
     expect(

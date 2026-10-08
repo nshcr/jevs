@@ -1,10 +1,8 @@
 import { test, expect } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { TypeSafeClient } from "@typesafe-ai/sdk";
+import { createProvider } from "../src/provider.ts";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { toResult } from "../src/tasks.ts";
-import type { Questions, SystemOneResult } from "@typesafe-ai/sdk";
 import { createServer } from "../src/server.ts";
 
 const questions = {
@@ -68,7 +66,7 @@ const answer = {
   usage: { input_tokens: 20, output_tokens: 10 },
 };
 
-test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model list and validation", async () => {
+test("stdio: handshake, discovery, provider HTTP, mixed questions, model list and validation", async () => {
   const requests: { path: string; body: unknown; auth: string | null }[] = [];
   const api = Bun.serve({
     hostname: "127.0.0.1",
@@ -95,12 +93,14 @@ test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model lis
   });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["src/index.ts"],
+    args: ["--no-env-file", "src/index.ts"],
     cwd: process.cwd(),
     env: {
-      TYPESAFE_API_KEY: "test-key",
-      TYPESAFE_BASE_URL: api.url.origin,
-      TYPESAFE_DEFAULT_MODEL: "jev-test",
+      JEVS_PROVIDER: "system-one",
+      JEVS_ALLOW_UNVERIFIED_MODELS: "true",
+      JEVS_API_KEY: "test-key",
+      JEVS_BASE_URL: api.url.origin,
+      JEVS_DEFAULT_MODEL: "jev-test",
     },
     stderr: "pipe",
   });
@@ -114,17 +114,39 @@ test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model lis
       "score",
       "check",
       "assess_structure",
-      "jev_list_models",
-      "jev_guide",
+      "list_models",
+      "provider_info",
+      "decision_guide",
     ]);
     const result = await client.callTool({
       name: "assess_structure",
       arguments: { content: { ticket: "Refund ASAP" }, ...assessment },
     });
     expect(result.isError).not.toBe(true);
-    expect(result.structuredContent).toEqual(
-      toResult(answer as SystemOneResult<Questions>),
-    );
+    expect(result.structuredContent).toEqual({
+      provider: "system-one",
+      protocol: "system-one",
+      model: "jev-test",
+      results: [
+        {
+          id: "category",
+          kind: "classification",
+          value: "billing",
+          confidence: 0.8,
+          probabilities: { billing: 0.9, support: 0.1 },
+        },
+        {
+          id: "severity",
+          kind: "score",
+          value: 0.7,
+          confidence: 0.4,
+          probabilities: { "0": 0.3, "1": 0.7 },
+          levels: { "0": "Low", "1": "High" },
+        },
+        { id: "urgency", kind: "check", probability: 0.9 },
+      ],
+      usage: { inputTokens: 20, outputTokens: 10 },
+    });
     expect(requests[0]).toEqual({
       path: "/v1/systemone",
       auth: "Bearer test-key",
@@ -136,7 +158,7 @@ test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model lis
     });
     expect((requests[1]!.body as { model: string }).model).toBe("jev-override");
     const models = await client.callTool({
-      name: "jev_list_models",
+      name: "list_models",
       arguments: {},
     });
     expect(models.isError).not.toBe(true);
@@ -146,7 +168,7 @@ test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model lis
       { content: "x" },
       {
         content: "x",
-        scores: [{ id: "q", question: null, levels: ["Only one"] }],
+        scores: [{ id: "q", question: null, levels: [] }],
       },
       {
         content: "x",
@@ -177,12 +199,12 @@ test("stdio: handshake, discovery, official SDK HTTP, mixed questions, model lis
 for (const status of [401, 429, 500]) {
   test(`HTTP ${status} becomes a sanitized MCP error after one configured attempt`, async () => {
     let calls = 0;
-    const sdk = new TypeSafeClient({
+    const sdk = createProvider({
+      kind: "system-one",
+      allowUnverifiedModels: true,
       baseURL: "https://api.typesafe.ai",
       defaultModel: "fixture",
       apiKey: "test",
-      logLevel: "off",
-      retry: { maxRetries: 0 },
       fetch: async () => {
         calls++;
         return Response.json({ message: "SECRET_INPUT" }, { status });
@@ -213,17 +235,26 @@ test("without key: discovery works and inference returns actionable configuratio
   const client = new Client({ name: "offline", version: "1" });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["src/index.ts"],
+    args: ["--no-env-file", "src/index.ts"],
     cwd: process.cwd(),
-    env: { TYPESAFE_API_KEY: "" },
+    env: { JEVS_PROVIDER: "typesafe", JEVS_API_KEY: "" },
     stderr: "pipe",
   });
   try {
     await client.connect(transport);
-    expect((await client.listTools()).tools).toHaveLength(7);
+    expect((await client.listTools()).tools).toHaveLength(8);
     expect(
-      (await client.callTool({ name: "jev_guide", arguments: {} })).isError,
+      (await client.callTool({ name: "decision_guide", arguments: {} }))
+        .isError,
     ).not.toBe(true);
+    const description = await client.callTool({
+      name: "provider_info",
+      arguments: {},
+    });
+    expect(description.isError).not.toBe(true);
+    expect(description.structuredContent).toMatchObject({
+      provider: "typesafe",
+    });
     const result = await client.callTool({
       name: "check",
       arguments: { content: null, items: [{ id: "q", question: null }] },
@@ -237,11 +268,12 @@ test("without key: discovery works and inference returns actionable configuratio
 
 test("individual tools preserve all structured fields and normalize results", async () => {
   const requests: any[] = [];
-  const sdk = new TypeSafeClient({
+  const sdk = createProvider({
+    kind: "system-one",
+    allowUnverifiedModels: true,
     baseURL: "https://api.typesafe.ai",
     defaultModel: "fixture",
     apiKey: "test",
-    logLevel: "off",
     fetch: async (_, init) => {
       const req = JSON.parse(init!.body as string);
       requests.push(req);
@@ -348,5 +380,283 @@ test("individual tools preserve all structured fields and normalize results", as
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+function stdioClient(env: Record<string, string>) {
+  const client = new Client({ name: "protocol-e2e", version: "1" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--no-env-file", "src/index.ts"],
+    cwd: process.cwd(),
+    env: {
+      JEVS_API_KEY: "test-key",
+      JEVS_BASE_URL: "",
+      JEVS_DEFAULT_MODEL: "",
+      CLOUDFLARE_ACCOUNT_ID: "",
+      CLOUDFLARE_AI_GATEWAY_ID: "",
+      ...env,
+    },
+    stderr: "pipe",
+  });
+  return { client, transport };
+}
+
+test("stdio OpenRouter supports non-Jev Decisions selections, absent metrics and capability-aware remote catalog", async () => {
+  const requests: { path: string; body: unknown; auth: string | null }[] = [];
+  const api = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      requests.push({
+        path,
+        body: req.method === "POST" ? await req.json() : null,
+        auth: req.headers.get("authorization"),
+      });
+      if (path === "/api/v1/models")
+        return Response.json({
+          data: [
+            {
+              id: "cloudflare/clef",
+              architecture: { output_modalities: ["decisions"] },
+            },
+            {
+              id: "typesafe/jev-1.13",
+              architecture: { output_modalities: ["decisions"] },
+            },
+            {
+              id: "togethercomputer/tev1-4b-experimental",
+              architecture: { output_modalities: ["text"] },
+            },
+            {
+              id: "future/undocumented",
+              architecture: { output_modalities: ["decisions"] },
+            },
+          ],
+        });
+      if (path !== "/api/alpha/decisions")
+        return new Response("unexpected", { status: 404 });
+      return Response.json({
+        model: "cloudflare/clef",
+        answers: {
+          category: { type: "choice", choice: "billing" },
+          severity: { type: "score", score: 0.7 },
+          urgency: { type: "noul", noul: 0.9 },
+        },
+        usage: { input_tokens: 20, output_tokens: 10 },
+      });
+    },
+  });
+  const { client, transport } = stdioClient({
+    JEVS_PROVIDER: "openrouter",
+    JEVS_BASE_URL: `${api.url.origin}/api`,
+    JEVS_DEFAULT_MODEL: "cloudflare/clef",
+  });
+  try {
+    await client.connect(transport);
+    const info = await client.callTool({
+      name: "provider_info",
+      arguments: {},
+    });
+    expect(info.isError).not.toBe(true);
+    expect(info.structuredContent).toMatchObject({
+      provider: "openrouter",
+      defaultModel: "cloudflare/clef",
+      capabilities: { mixedQuestions: true, confidence: "provider-defined" },
+    });
+    const result = await client.callTool({
+      name: "assess_structure",
+      arguments: {
+        content: "Refund ASAP",
+        ...assessment,
+        checks: [{ id: "urgency", question: "Urgent?" }],
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      provider: "openrouter",
+      protocol: "openrouter-decisions",
+      model: "cloudflare/clef",
+      results: [
+        { id: "category", kind: "classification", value: "billing" },
+        { id: "severity", kind: "score", value: 0.7 },
+        { id: "urgency", kind: "check", probability: 0.9 },
+      ],
+      usage: { inputTokens: 20, outputTokens: 10 },
+    });
+    expect(requests[0]).toMatchObject({
+      path: "/api/alpha/decisions",
+      auth: "Bearer test-key",
+      body: { model: "cloudflare/clef", state: "Refund ASAP" },
+    });
+    const catalog = await client.callTool({
+      name: "list_models",
+      arguments: {},
+    });
+    expect(catalog.isError).not.toBe(true);
+    const output = catalog.structuredContent as {
+      source: string;
+      complete: boolean;
+      models: {
+        id: string;
+        availability: string;
+        protocol?: string;
+        capabilities?: unknown;
+      }[];
+    };
+    expect(output.source).toBe("remote");
+    expect(output.models.find((m) => m.id === "cloudflare/clef")).toMatchObject(
+      { availability: "supported" },
+    );
+    expect(
+      output.models.find((m) => m.id === "cloudflare/clef")?.protocol,
+    ).toBeDefined();
+    expect(
+      output.models.find((m) => m.id === "cloudflare/clef")?.capabilities,
+    ).toBeDefined();
+    expect(
+      output.models.find(
+        (m) => m.id === "togethercomputer/tev1-4b-experimental",
+      ),
+    ).toBeUndefined();
+    expect(
+      output.models.find((m) => m.id === "future/undocumented"),
+    ).toMatchObject({ availability: "unverified" });
+    const before = requests.length;
+    const image = await client.callTool({
+      name: "check",
+      arguments: {
+        content: "fixture",
+        images: ["data:image/png;base64,YQ=="],
+        items: [{ id: "q", question: "Present?" }],
+      },
+    });
+    expect(image.isError).toBe(true);
+    expect(JSON.stringify(image)).toContain("INVALID_REQUEST");
+    expect(requests).toHaveLength(before);
+  } finally {
+    await client.close();
+    api.stop(true);
+  }
+});
+
+test("stdio Clef multimodal inference selects Workers model path and retains model-independent catalog metadata", async () => {
+  const requests: {
+    path: string;
+    body: unknown;
+    gateway: string | null;
+    auth: string | null;
+  }[] = [];
+  const api = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      requests.push({
+        path,
+        body: await req.json(),
+        gateway: req.headers.get("cf-aig-gateway-id"),
+        auth: req.headers.get("authorization"),
+      });
+      if (
+        path !== "/client/v4/accounts/fixture/ai/run/@cf/cloudflare/clef-flash"
+      )
+        return new Response("unexpected", { status: 404 });
+      return Response.json({
+        success: true,
+        result: {
+          model: "clef-flash",
+          answers: { q: { type: "noul", noul: 0.8 } },
+          usage: { input_tokens: 8, output_tokens: 1 },
+        },
+      });
+    },
+  });
+  const { client, transport } = stdioClient({
+    JEVS_PROVIDER: "cloudflare-workers",
+    JEVS_BASE_URL: `${api.url.origin}/client/v4/accounts/fixture/ai`,
+    JEVS_DEFAULT_MODEL: "@cf/cloudflare/clef-flash",
+    CLOUDFLARE_ACCOUNT_ID: "fixture",
+    CLOUDFLARE_AI_GATEWAY_ID: "fixture-gateway",
+  });
+  const images = [
+    "data:image/png;base64,YQ==",
+    { content_type: "image/jpeg", base64: "Yg==" },
+  ];
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "check",
+      arguments: {
+        content: { task: "Inspect attached images" },
+        images,
+        items: [
+          {
+            id: "q",
+            question: { target: "Matches?" },
+            yes: "Match",
+            no: "Mismatch",
+          },
+        ],
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      provider: "cloudflare-workers",
+      model: "clef-flash",
+      results: [{ id: "q", kind: "check", probability: 0.8 }],
+    });
+    expect(requests).toEqual([
+      {
+        path: "/client/v4/accounts/fixture/ai/run/@cf/cloudflare/clef-flash",
+        gateway: "fixture-gateway",
+        auth: "Bearer test-key",
+        body: {
+          model: "clef-flash",
+          state: { task: "Inspect attached images" },
+          images,
+          questions: {
+            q: {
+              type: "noul",
+              instructions: { target: "Matches?" },
+              criteria: { true: "Match", false: "Mismatch" },
+            },
+          },
+        },
+      },
+    ]);
+    const catalog = await client.callTool({
+      name: "list_models",
+      arguments: {},
+    });
+    expect(catalog.isError).not.toBe(true);
+    const output = catalog.structuredContent as {
+      source: string;
+      complete: boolean;
+      capabilities: { inputs: string[] };
+      models: { id: string; availability: string }[];
+    };
+    expect(output.source).toBe("configured");
+    expect(output.complete).toBe(false);
+    expect(output.capabilities.inputs).toContain("image");
+    expect(
+      output.models.find((m) => m.id === "@cf/cloudflare/clef-flash"),
+    ).toMatchObject({ availability: "supported" });
+    expect(requests).toHaveLength(1);
+    const invalid = await client.callTool({
+      name: "check",
+      arguments: {
+        content: "fixture",
+        model: "@cf/other/chat-model",
+        items: [{ id: "q", question: "Present?" }],
+      },
+    });
+    expect(invalid.isError).toBe(true);
+    expect(JSON.stringify(invalid)).toContain("INVALID_REQUEST");
+    expect(requests).toHaveLength(1);
+  } finally {
+    await client.close();
+    api.stop(true);
   }
 });

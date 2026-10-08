@@ -36,20 +36,25 @@ try {
   await client.connect(
     new StdioClientTransport({
       command: config.command,
-      args: config.args,
+      args: ["--no-env-file", ...config.args],
       cwd: resolve(root, config.cwd),
-      env: { TYPESAFE_API_KEY: "" },
+      env: {
+        JEVS_PROVIDER: "typesafe",
+        JEVS_API_KEY: "",
+        JEVS_BASE_URL: "",
+        JEVS_DEFAULT_MODEL: "",
+      },
       stderr: "pipe",
     }),
   );
   if (client.getServerVersion()?.version !== manifest.version)
     throw Error("Plugin/MCP version mismatch");
-  if ((await client.listTools()).tools.length !== 7)
+  if ((await client.listTools()).tools.length !== 8)
     throw Error("Missing plugin tools");
   if (
     (
       await client.callTool({
-        name: "jev_guide",
+        name: "decision_guide",
         arguments: { topic: "overview" },
       })
     ).isError

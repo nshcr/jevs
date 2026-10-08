@@ -26,4 +26,9 @@ jobs:
         with:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Prepare Python bridge verification
+        run: |
+          python3 -m venv .local/test-python
+          .local/test-python/bin/python -m pip install -r scripts/requirements-test.txt
+          echo "$PWD/.local/test-python/bin" >> "$GITHUB_PATH"
       - run: bun run verify

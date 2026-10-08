@@ -1,149 +1,38 @@
-import type { Fetch, SystemOneRequest, Questions } from "@typesafe-ai/sdk";
 import { z } from "zod";
-
-export function isZen(baseURL: string) {
-  const url = new URL(baseURL);
-  return (
-    url.origin === "https://opencode.ai" &&
-    url.pathname.replace(/\/$/, "") === "/zen"
-  );
-}
-
-export function isVercel(baseURL: string) {
-  const url = new URL(baseURL);
-  return (
-    url.origin === "https://ai-gateway.vercel.sh" &&
-    url.pathname.replace(/\/+$/, "") === "/typesafe"
-  );
-}
-
-function isOpenRouter(url: URL) {
-  return url.origin === "https://openrouter.ai";
-}
-function cloudflareRoot(url: URL) {
-  return url.origin === "https://api.cloudflare.com"
-    ? url.pathname.match(
-        /^\/client\/v4\/accounts\/[a-zA-Z0-9_-]+\/ai(?=\/|$)/,
-      )?.[0]
-    : undefined;
-}
-
-// Official SDK retains authentication, timeout, cancellation and HTTP error handling.
-// Rewrites are restricted to known origins and exact SDK operation paths.
-export function providerFetch(
-  fetcher: Fetch = fetch,
-  config: { cloudflareGatewayId?: string } = {},
-): Fetch {
-  return async (input, init) => {
-    const url = new URL(input);
-    const method = init?.method ?? "GET";
-    const cfRoot = cloudflareRoot(url);
-    let target = input;
-    let options = init;
-    let catalog = false;
-    let cloudflareInference = false;
-    if (
-      isOpenRouter(url) &&
-      url.pathname === "/api/v1/systemone" &&
-      method === "POST"
-    ) {
-      target = `${url.origin}/api/alpha/decisions`;
-    } else if (
-      cfRoot &&
-      url.pathname === `${cfRoot}/v1/systemone` &&
-      method === "POST"
-    ) {
-      const { model, ...payload } = JSON.parse(init!.body as string);
-      target = `${url.origin}${cfRoot}/run`;
-      const headers = new Headers(init?.headers);
-      if (config.cloudflareGatewayId?.trim()) {
-        headers.set("cf-aig-gateway-id", config.cloudflareGatewayId.trim());
-      }
-      options = {
-        ...init,
-        headers,
-        body: JSON.stringify({ model, input: payload }),
-      };
-      cloudflareInference = true;
-    }
-    if (method === "GET") {
-      catalog =
-        (url.origin === "https://opencode.ai" &&
-          url.pathname === "/zen/v1/models") ||
-        (isOpenRouter(url) && url.pathname === "/api/v1/models");
-      if (cfRoot && url.pathname === `${cfRoot}/v1/models`) {
-        target = `${url.origin}${cfRoot}/models/search?search=typesafe%2Fjev&per_page=100&format=openrouter`;
-        catalog = true;
-      }
-    }
-    const response = await fetcher(target, options);
-    if (!response.ok || (!catalog && !cloudflareInference)) return response;
-    const raw: unknown = await response
-      .clone()
-      .json()
-      .catch(() => undefined);
-    function rewrite(body: unknown) {
-      const headers = new Headers(response.headers);
-      headers.delete("content-length");
-      headers.delete("content-encoding");
-      return Response.json(body, { status: response.status, headers });
-    }
-    if (cloudflareInference) {
-      // Accept documented direct output or the standard Cloudflare REST envelope.
-      if (raw && typeof raw === "object" && "success" in raw) {
-        const envelope = z
-          .object({
-            success: z.literal(true),
-            result: z.record(z.string(), z.unknown()),
-          })
-          .safeParse(raw);
-        return envelope.success ? rewrite(envelope.data.result) : response;
-      }
-      return response;
-    }
-    if (
-      url.origin === "https://opencode.ai" &&
-      !z.object({ object: z.literal("list") }).safeParse(raw).success
-    )
-      return response;
-    const parsed = z
-      .object({
-        data: z.array(
-          z.object({
-            id: z.string().min(1),
-            description: z.string().optional(),
-          }),
-        ),
-      })
-      .safeParse(raw);
-    if (!parsed.success || (cfRoot && parsed.data.data.length >= 100))
-      return response;
-    const prefix = cfRoot
-      ? "typesafe/jev"
-      : isOpenRouter(url)
-        ? "typesafe/jev-"
-        : "jev-";
-    return rewrite({
-      models: parsed.data.data
-        .filter(({ id }) => (cfRoot ? id === prefix : id.startsWith(prefix)))
-        .map(({ id, description }) => ({
-          name: id,
-          description: description ?? "",
-          release_date: "",
-        })),
-    });
-  };
-}
-
-// Defaults apply only to known configured endpoints; explicit model IDs always win.
-export function providerDefaultModel(baseURL: string | undefined) {
-  if (!baseURL) return "jev-latest";
+import type {
+  DecisionProvider,
+  ProviderOptions,
+  ProviderDescription,
+  ModelCatalog,
+  ProviderExtensions,
+} from "./decision.ts";
+import {
+  ProviderConfigurationError,
+  ProviderInputError,
+  ResponseContractError,
+  RequestCancelledError,
+} from "./failures.ts";
+import { createTransport } from "./providers/transport.ts";
+import { capabilitiesSchema } from "./contracts.ts";
+import { providerKinds } from "./decision.ts";
+import {
+  validateAssessment,
+  validateModelAdmission,
+  assessmentToolSupport,
+} from "./capabilities.ts";
+import { createClefPythonProvider } from "./providers/clef-python.ts";
+import {
+  createRegistry,
+  adapterEndpoint,
+  knownOpenaiDecisionModels,
+} from "./providers/registry.ts";
+function baseUrl(value: string): string {
   let url: URL;
   try {
-    url = new URL(baseURL);
+    url = new URL(value);
   } catch {
     throw new ProviderConfigurationError(
-      "Set TYPESAFE_BASE_URL to a valid absolute HTTP(S) base URL.",
+      "Set a valid absolute HTTP(S) provider base URL.",
     );
   }
   if (
@@ -152,96 +41,308 @@ export function providerDefaultModel(baseURL: string | undefined) {
     url.hash ||
     url.username ||
     url.password
-  ) {
+  )
     throw new ProviderConfigurationError(
       "Use an HTTP(S) base URL without query, fragment or embedded credentials.",
     );
-  }
-  const path = url.pathname.replace(/\/+$/, "");
-  if (url.origin === "https://api.typesafe.ai" && path !== "") {
-    throw new ProviderConfigurationError(
-      "Set TYPESAFE_BASE_URL to https://api.typesafe.ai without an API operation suffix.",
-    );
-  }
-  if (url.origin === "https://opencode.ai" && path !== "/zen") {
-    throw new ProviderConfigurationError(
-      "Set TYPESAFE_BASE_URL to https://opencode.ai/zen without an API operation suffix.",
-    );
-  }
-  if (url.origin === "https://ai-gateway.vercel.sh") {
-    if (path !== "/typesafe")
-      throw new ProviderConfigurationError(
-        "Set TYPESAFE_BASE_URL to https://ai-gateway.vercel.sh/typesafe for the TypeSafe-compatible API.",
-      );
-    return "typesafe-ai/jev";
-  }
-  if (isOpenRouter(url)) {
-    if (path !== "/api")
-      throw new ProviderConfigurationError(
-        "Set TYPESAFE_BASE_URL to https://openrouter.ai/api; the adapter selects the Decisions endpoint.",
-      );
-    return "typesafe/jev-1.13";
-  }
-  if (url.origin === "https://api.cloudflare.com") {
-    if (cloudflareRoot(url) !== path)
-      throw new ProviderConfigurationError(
-        "Set TYPESAFE_BASE_URL to https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai.",
-      );
-    return "typesafe/jev";
-  }
-  return url.origin === "https://opencode.ai" && path === "/zen"
-    ? "jev-1.13"
-    : "jev-latest";
+  return url.href.replace(/\/+$/, "");
 }
-
-export class ProviderConfigurationError extends Error {}
-export class ProviderInputError extends Error {}
-export function validateProviderRequest(
-  baseURL: string,
-  request: SystemOneRequest<Questions>,
-) {
-  if (isOpenRouter(new URL(baseURL))) {
-    if (request.state === null)
+export function createProvider(
+  options: ProviderOptions,
+  extensions: ProviderExtensions = {},
+): DecisionProvider {
+  const kind = options.kind;
+  if (!providerKinds.includes(kind))
+    throw new ProviderConfigurationError("Select a supported provider kind.");
+  if (options.protocol !== undefined && kind !== "custom")
+    throw new ProviderConfigurationError(
+      "An explicit protocol is supported only by the custom provider.",
+    );
+  if (kind === "clef-python") return createClefPythonProvider(options);
+  const registry = createRegistry(extensions);
+  if (options.apiKey && /[\r\n]/.test(options.apiKey))
+    throw new ProviderConfigurationError(
+      "Provide an API credential without line breaks.",
+    );
+  const cf = kind.startsWith("cloudflare");
+  if (
+    cf &&
+    ((!options.baseURL && !options.accountId) ||
+      (options.accountId !== undefined &&
+        !/^[a-zA-Z0-9_-]+$/.test(options.accountId)))
+  )
+    throw new ProviderConfigurationError("Cloudflare requires an account ID.");
+  if (options.gatewayId && !/^[a-zA-Z0-9_-]+$/.test(options.gatewayId))
+    throw new ProviderConfigurationError("Set a valid Cloudflare gateway ID.");
+  if (
+    (kind === "system-one" || kind === "custom") &&
+    (!options.baseURL ||
+      !options.defaultModel?.trim() ||
+      (kind === "custom" && !options.protocol?.trim()))
+  )
+    throw new ProviderConfigurationError(
+      "Custom providers require an explicit base URL, default model and protocol (System One selects its own protocol).",
+    );
+  const defaults = {
+    openai: ["https://api.openai.com", "gpt-6-luna"],
+    typesafe: ["https://api.typesafe.ai", "jev-latest"],
+    "system-one": [options.baseURL ?? "", options.defaultModel ?? ""],
+    custom: [options.baseURL ?? "", options.defaultModel ?? ""],
+    openrouter: ["https://openrouter.ai/api", "typesafe/jev-1.13"],
+    "cloudflare-workers": [
+      `https://api.cloudflare.com/client/v4/accounts/${options.accountId}/ai`,
+      "@cf/cloudflare/clef",
+    ],
+    "cloudflare-gateway": [
+      `https://api.cloudflare.com/client/v4/accounts/${options.accountId}/ai`,
+      "typesafe/jev",
+    ],
+    vercel: ["https://ai-gateway.vercel.sh/typesafe", "typesafe-ai/jev"],
+    zen: ["https://opencode.ai/zen", "jev-1.13"],
+  } as const;
+  const base = baseUrl(options.baseURL ?? defaults[kind][0]);
+  const defaultModel = options.defaultModel?.trim() || defaults[kind][1];
+  const clefModel = (model: string): string => {
+    const value = model.replace(/^@cf\/cloudflare\//, "");
+    if (value !== "clef" && value !== "clef-flash")
       throw new ProviderInputError(
-        "Provide non-null content for this endpoint.",
+        "Workers AI supports only the configured Clef and Clef Flash models.",
       );
-    for (const q of Object.values(request.questions)) {
-      if (q.instructions === null)
-        throw new ProviderInputError(
-          "Provide a non-null question for every judgment on this endpoint.",
-        );
-      if (q.type === "score" && q.criteria.some((v) => v === null))
-        throw new ProviderInputError(
-          "Describe every score level with a non-null value.",
-        );
-      if (
-        q.type === "noul" &&
-        q.criteria &&
-        (q.criteria.true == null || q.criteria.false == null)
-      )
-        throw new ProviderInputError(
-          "Supply both non-null yes and no definitions, or omit both on this endpoint.",
-        );
+    return value;
+  };
+  if (kind === "cloudflare-workers") {
+    try {
+      clefModel(defaultModel);
+    } catch {
+      throw new ProviderConfigurationError(
+        "Configure a supported Clef or Clef Flash default model.",
+      );
     }
   }
-  if (!isZen(baseURL)) return;
-  if (request.state === null)
-    throw new ProviderInputError(
-      "OpenCode Zen requires non-null content; provide text, an object or an array.",
+  const protocol =
+    kind === "custom"
+      ? options.protocol!
+      : kind === "openai"
+        ? "openai-decisions"
+        : kind === "openrouter"
+          ? "openrouter-decisions"
+          : kind === "cloudflare-workers"
+            ? "cloudflare-clef"
+            : kind === "cloudflare-gateway"
+              ? "cloudflare-gateway-system-one"
+              : "system-one";
+  if (!registry.adapters.has(protocol))
+    throw new ProviderConfigurationError(
+      "Select a registered decision protocol.",
     );
-  for (const q of Object.values(request.questions)) {
-    if (q.type === "score" && q.criteria.some((level) => level === null))
-      throw new ProviderInputError(
-        "OpenCode Zen requires non-null score levels; describe every level using text, an object or an array.",
+  const canonicalDefault =
+    kind === "cloudflare-workers"
+      ? `@cf/cloudflare/${clefModel(defaultModel)}`
+      : defaultModel;
+  function resolve(selected = canonicalDefault): ProviderDescription {
+    const value = selected.trim();
+    if (!value) throw new ProviderInputError("Provide a non-empty model ID.");
+    const model =
+      kind === "cloudflare-workers"
+        ? `@cf/cloudflare/${clefModel(value)}`
+        : value;
+    const entry = registry.profiles.get(`${kind}\0${model}`);
+    const selectedProtocol = entry?.profile.protocol ?? protocol;
+    const adapter = registry.adapters.get(selectedProtocol)!;
+    const capabilities =
+      entry?.profile.capabilities ??
+      adapter.capabilities({ provider: kind, model });
+    if (!capabilitiesSchema.safeParse(capabilities).success)
+      throw new ProviderConfigurationError(
+        "The selected adapter must describe valid capabilities.",
       );
-    if (
-      q.type === "noul" &&
-      q.instructions === null &&
-      q.criteria?.true == null &&
-      q.criteria?.false == null
-    )
-      throw new ProviderInputError(
-        "OpenCode Zen requires a check question or at least one non-null yes/no definition.",
+    const availability = entry?.profile.availability ?? "unverified";
+    return structuredClone({
+      provider: kind,
+      protocol: selectedProtocol,
+      defaultModel: canonicalDefault,
+      model,
+      availability,
+      unverifiedModelsAllowed: options.allowUnverifiedModels === true,
+      toolSupport: assessmentToolSupport(capabilities, availability),
+      capabilitySource: entry
+        ? entry.configured
+          ? "configuration"
+          : "model"
+        : kind === "custom" || kind === "system-one"
+          ? "configuration"
+          : "protocol",
+      capabilities,
+      ...(entry?.profile.reason !== undefined
+        ? { reason: entry.profile.reason }
+        : availability === "unverified"
+          ? {
+              reason:
+                "The protocol baseline is known, but this model's decision support is not verified. Explicitly allow an unverified model to attempt it.",
+            }
+          : {}),
+    });
+  }
+  const description = resolve();
+  const transport = createTransport(options);
+  function requireCredentials() {
+    if (kind !== "system-one" && kind !== "custom" && !options.apiKey?.trim())
+      throw new ProviderConfigurationError(
+        "Configure this provider's API credential before making requests.",
       );
   }
+  const modelCard = (id: string, description?: string) => {
+    const info = resolve(id);
+    return {
+      id: info.model,
+      ...(description !== undefined ? { description } : {}),
+      protocol: info.protocol,
+      availability: info.availability,
+      capabilitySource: info.capabilitySource,
+      capabilities: info.capabilities,
+      ...(info.reason !== undefined ? { reason: info.reason } : {}),
+    };
+  };
+  return {
+    describe: resolve,
+    async evaluate(input, signal) {
+      if (signal.aborted) throw new RequestCancelledError("Request cancelled.");
+      const info = resolve(input.model);
+      validateModelAdmission(input, info);
+      validateAssessment(input, info.capabilities);
+      const adapter = registry.adapters.get(info.protocol)!;
+      const prepared = adapter.prepare(input, {
+        provider: kind,
+        model: info.model,
+      });
+      const endpoint = adapterEndpoint(base, prepared.path);
+      requireCredentials();
+      const raw = await transport(endpoint, signal, prepared.body);
+      return prepared.decode(raw);
+    },
+    async listModels(signal): Promise<ModelCatalog> {
+      if (signal.aborted) throw new RequestCancelledError("Request cancelled.");
+      if (kind === "system-one" || kind === "custom" || cf)
+        return {
+          ...structuredClone(description),
+          source: "configured",
+          complete: false,
+          models:
+            kind === "cloudflare-workers"
+              ? [
+                  modelCard("@cf/cloudflare/clef"),
+                  modelCard("@cf/cloudflare/clef-flash"),
+                ]
+              : [
+                  ...new Set([
+                    canonicalDefault,
+                    ...[...registry.profiles.values()]
+                      .filter((entry) => entry.profile.provider === kind)
+                      .map((entry) => entry.profile.model),
+                  ]),
+                ].map((id) => modelCard(id)),
+        };
+      requireCredentials();
+      const raw = await transport(
+        kind === "openrouter"
+          ? `${base}/v1/models?output_modalities=decisions`
+          : `${base}/v1/models`,
+        signal,
+      );
+      const fail = (): never => {
+        throw new ResponseContractError(
+          "Model service returned an invalid catalog.",
+        );
+      };
+      let models: ModelCatalog["models"];
+      if (kind === "openai") {
+        const parsed = z
+          .object({
+            object: z.literal("list"),
+            data: z.array(z.object({ id: z.string().min(1) })),
+          })
+          .safeParse(raw);
+        if (!parsed.success) return fail();
+        if (
+          new Set(parsed.data.data.map((m) => m.id)).size !==
+          parsed.data.data.length
+        )
+          return fail();
+        models = parsed.data.data
+          .filter((m) =>
+            (knownOpenaiDecisionModels as readonly string[]).includes(m.id),
+          )
+          .map((m) => ({
+            ...modelCard(m.id),
+            reason:
+              "This model is returned by the account model list; that does not prove Decisions endpoint access.",
+          }));
+        return {
+          ...structuredClone(description),
+          source: "remote",
+          complete: false,
+          models,
+          reason: models.some((m) => m.id === canonicalDefault)
+            ? "The default model is listed for this account; that does not prove Decisions endpoint access. Only documented Decisions model IDs are recognized."
+            : "The configured default model was not returned among recognized Decisions models in the account model list. Static protocol support does not establish account access.",
+        };
+      } else if (kind === "openrouter") {
+        const schema = z.object({
+          data: z.array(
+            z.object({
+              id: z.string().min(1),
+              description: z.string().optional(),
+              architecture: z.object({
+                output_modalities: z.array(z.string()),
+              }),
+            }),
+          ),
+        });
+        const parsed = schema.safeParse(raw);
+        if (!parsed.success) return fail();
+        models = parsed.data.data
+          .filter((m) => m.architecture.output_modalities.includes("decisions"))
+          .map((m) => modelCard(m.id, m.description));
+      } else if (kind === "zen") {
+        const parsed = z
+          .object({
+            object: z.literal("list"),
+            data: z.array(
+              z.object({
+                id: z.string().min(1),
+                description: z.string().optional(),
+              }),
+            ),
+          })
+          .safeParse(raw);
+        if (!parsed.success) return fail();
+        models = parsed.data.data
+          .filter((m) => m.id.startsWith("jev-"))
+          .map((m) => modelCard(m.id, m.description));
+      } else {
+        const parsed = z
+          .object({
+            models: z.array(
+              z.object({
+                name: z.string().min(1),
+                description: z.string().optional(),
+              }),
+            ),
+          })
+          .safeParse(raw);
+        if (!parsed.success) return fail();
+        models = parsed.data.models.map((m) =>
+          modelCard(m.name, m.description),
+        );
+      }
+      if (new Set(models.map((m) => m.id)).size !== models.length)
+        return fail();
+      return {
+        ...structuredClone(description),
+        source: "remote",
+        complete: true,
+        models,
+      };
+    },
+  };
 }

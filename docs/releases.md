@@ -4,15 +4,15 @@
 
 ## 本地验证
 
-使用 `.bun-version` 指定的 Bun，依赖已安装时可完全离线运行：
+按 [开发环境](../README.md#开发与验证) 准备 Bun 和 Python 测试依赖后运行：
 
 ```sh
-bun run verify
+PATH="$PWD/.local/test-python/bin:$PATH" bun run verify
 ```
 
 执行治理、格式、类型、测试、构建、MCP 冒烟检查，生成 `artifacts/marketplace/` 并检查精确文件清单、逐文件哈希、源码哈希和文档链接。重复运行会替换这一生成目录。密钥放在 `.env` 或宿主私有环境中，不纳入发布目录。
 
-GitHub Action 先执行 `bun install --frozen-lockfile --ignore-scripts`，再执行 `bun run verify`；依赖安装可能访问 registry。默认测试仅使用本地 HTTP 模拟端点，发布测试使用临时本地 Git bare 仓库，不调用模型或外部 Git 服务。
+GitHub Action 安装锁定的 Bun 依赖，并在 `.local/test-python` 虚拟环境安装 `scripts/requirements-test.txt` 后验证。测试使用 loopback HTTP、真实 Python/Pillow 与合成模型后端；发布测试使用临时本地 Git bare 仓库，不调用远端模型。依赖安装可能访问 registry。
 
 marketplace 包含 `.agents/plugins/marketplace.json`、根 README、`docs/providers.md`、`build-info.json`、`CHECKSUMS.sha256`，以及 `plugins/jevs/` 下的 manifest、MCP 配置、bundle、skill 和许可证。依赖已打入 bundle；用户仍需预装 Bun。许可证清单为安装依赖的保守超集，不是精确 bundle SBOM。
 
